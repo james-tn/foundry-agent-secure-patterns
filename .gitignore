@@ -1,0 +1,10 @@
+# Local deployment identifiers — never share or commit
+env.local
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Vendored reference templates
+vendor/
