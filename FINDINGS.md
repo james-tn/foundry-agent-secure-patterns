@@ -497,27 +497,33 @@ a slow cold start.
 > Verified via **PUT** (create-or-replace), which is the in-contract path for
 > this property — see [`VALIDATION.md`](VALIDATION.md) §3.
 
-**What MCP means here.** MCP is client/server, and in this architecture the
-**session pool is the server, the agent is the client**. An ACA session pool can
-expose a platform-managed MCP endpoint at `.../sessionPools/<pool>/mcp` that
-advertises the sandbox as tools:
+**What MCP means here.** MCP is a general-purpose tool protocol — an agent
+(client) connects to any MCP server you point it at, and attaching one is
+ordinary agent configuration with no ACA involvement. **This section is narrower:**
+ACA session pools ship a *pre-built* MCP server in front of the code sandbox, so
+you can expose "run this code" to an agent without writing a server yourself.
+In that arrangement the **session pool is the server and the agent is the
+client**. The endpoint at `.../sessionPools/<pool>/mcp` advertises:
 
 ```text
 launchPythonEnvironment            -> returns an environmentId
 runPythonCodeInRemoteEnvironment   -> executes code in that environment
 ```
 
-Foundry then holds a `RemoteTool` connection to that endpoint, and the agent
-discovers and calls those tools itself. This is why `mcpServerSettings` is a
-property of the **pool** — not of the agent runtime — and therefore why
-`containerType` is in scope at all.
+Those are simply the tools that *this particular* server exposes. Foundry holds a
+`RemoteTool` connection to the endpoint, and the agent discovers and calls them.
+This is why `mcpServerSettings` is a property of the **pool** — not of the agent
+runtime — and therefore why `containerType` is in scope at all.
 
-The practical consequence is a choice between two wiring patterns:
+The practical consequence is a choice of how the agent reaches your sandbox:
 
-| Pattern | How code runs | Works on |
+| Pattern | Code you write | Works on |
 |---|---|---|
-| **Via MCP** | Agent calls the pool's MCP tools server-side; your app sends only a prompt | Managed `PythonLTS` pools |
-| **Direct data plane** | Your application calls `/executions` on the pool and feeds results back | **Any** pool, including custom containers |
+| **ACA's built-in MCP server** | None — set `isMcpServerEnabled` | Managed `PythonLTS` pools |
+| **Your own MCP server or OpenAPI tool** in front of the pool | A server or HTTP shim | Any pool |
+| **Direct data plane** — app calls `/executions` and feeds results back | Orchestration in your app | Any pool |
+
+Only the first is affected by the gap below; MCP as a protocol works regardless.
 
 The `Microsoft.App/SessionPoolsSupportMCP` feature was `Registered`. Even so, MCP
 could not be enabled on a custom container pool. The decisive test removed every
