@@ -497,6 +497,28 @@ a slow cold start.
 > Verified via **PUT** (create-or-replace), which is the in-contract path for
 > this property — see [`VALIDATION.md`](VALIDATION.md) §3.
 
+**What MCP means here.** MCP is client/server, and in this architecture the
+**session pool is the server, the agent is the client**. An ACA session pool can
+expose a platform-managed MCP endpoint at `.../sessionPools/<pool>/mcp` that
+advertises the sandbox as tools:
+
+```text
+launchPythonEnvironment            -> returns an environmentId
+runPythonCodeInRemoteEnvironment   -> executes code in that environment
+```
+
+Foundry then holds a `RemoteTool` connection to that endpoint, and the agent
+discovers and calls those tools itself. This is why `mcpServerSettings` is a
+property of the **pool** — not of the agent runtime — and therefore why
+`containerType` is in scope at all.
+
+The practical consequence is a choice between two wiring patterns:
+
+| Pattern | How code runs | Works on |
+|---|---|---|
+| **Via MCP** | Agent calls the pool's MCP tools server-side; your app sends only a prompt | Managed `PythonLTS` pools |
+| **Direct data plane** | Your application calls `/executions` on the pool and feeds results back | **Any** pool, including custom containers |
+
 The `Microsoft.App/SessionPoolsSupportMCP` feature was `Registered`. Even so, MCP
 could not be enabled on a custom container pool. The decisive test removed every
 variable — Microsoft's own sample image, the newest *published* preview API

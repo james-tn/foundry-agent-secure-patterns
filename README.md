@@ -174,6 +174,14 @@ design around it — and each has a workaround.
 
 ### 1. MCP cannot be enabled on CustomContainer session pools — contradicts published docs
 
+**Context, because this is easily misread.** MCP here is *not* about the agent
+runtime. An ACA session pool can expose a platform-managed **MCP server** at
+`.../sessionPools/<pool>/mcp` that advertises the sandbox as tools
+(`launchPythonEnvironment`, `runPythonCodeInRemoteEnvironment`); the **agent is
+the MCP client** that calls them. So `mcpServerSettings` is a property of the
+*pool*, which is why its `containerType` matters. Enabling it lets the agent
+orchestrate code execution server-side, with no execution code in your app.
+
 Tested along the fully documented path, with every variable removed:
 
 - **PUT** (create-or-replace), not PATCH — `mcpServerSettings` is absent from the
