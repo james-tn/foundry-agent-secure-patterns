@@ -3,14 +3,14 @@
 Consolidated evidence from a hands-on POC that deployed a network-isolated
 Foundry Agent Service environment and measured its behaviour.
 
-- **Built:** 2026-08-04 → 08-05 · **Re-validated:** 08-06 · **Demos rehearsed:** 08-07
+- **Measured:** August 2026
 - **Environment:** two regions, `gpt-4.1`, Standard Agent Setup with network injection
 - Everything below was **measured live in Azure**, not sourced from documentation.
 
 > **This file is evidence, not guidance.** For the reusable recommendations
 > derived from it, see [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md).
-> For the audit trail of how these conclusions were challenged and two of them
-> corrected, see [`VALIDATION.md`](VALIDATION.md).
+> For how these conclusions were independently re-tested, see
+> [`VALIDATION.md`](VALIDATION.md).
 
 **Redaction.** Subscription IDs, tenant details and resource names are replaced
 with placeholders such as `<foundry-account>` and `<subscription-id>`. Log output
@@ -33,6 +33,19 @@ them as an SLA.
 ---
 
 # 1. Cold start, idle behaviour and latency
+
+**Three independent layers get conflated as "cold start".** They have different
+causes, different fixes, and only one of them exposes a warm-up control:
+
+| Layer | What it is | Warm-up control? | Measured cold cost |
+|---|---|---|---|
+| **Model** | The `gpt-4.1` deployment serving inference | No — and none needed; there is no idle de-allocation | ~1.3 s idle delta (§1.1) |
+| **Agent runtime** | The Foundry-managed data proxy that runs the agent and calls its tools, injected into your VNet | **None exposed** — no min-replica or keep-warm setting exists | No measurable penalty (§1.1, §1.7) |
+| **Code-execution sandbox** | The ACA dynamic session that runs generated code | `readySessionInstances`, **custom-container pools only** (§1.3) | ~0.36 s (§1.2) |
+
+The "keep a few main agents always alive" question targets the middle layer —
+where **no control exists, and none is needed**. Sections 1.1–1.4 measure each
+layer; §1.7 answers the question directly.
 
 ## 1.1 Model layer — is there idle de-allocation? **No.**
 
@@ -71,6 +84,11 @@ to eliminate, and therefore no measurable benefit from warming the managed pool.
 
 ## 1.3 Warm-instance setting is silently ignored on managed pools
 
+**Scope: this is the code-execution sandbox, not the agent runtime.**
+`readySessionInstances` is a property of an **ACA dynamic session pool** — the
+sandbox that runs generated code. It has no bearing on how long an agent stays
+resident; the agent runtime exposes no warm-up control at all.
+
 `readySessionInstances` (CLI `--ready-sessions`) is **silently ignored on managed
 Python pools** on *every* API version tried — `2025-01-01`, `2026-01-01`,
 `2025-10-02-preview`, `2026-03-02-preview` — via both CLI and raw ARM. The
@@ -85,6 +103,20 @@ was accepted and persisted.
 
 The CLI flag is **`--ready-sessions`**. Several docs and snippets show
 `--ready-session-instances`, which does not exist.
+
+### Options, by layer
+
+| Goal | Option | Verdict |
+|---|---|---|
+| Keep the **agent** warm | No platform setting exists | Not needed — a 10-minute idle cost ~1.3 s (§1.1) |
+| Keep the **managed Python pool** warm | `readySessionInstances` | **Ignored.** Also pointless — new sessions take ~0.36 s (§1.2) |
+| Keep a **custom container pool** warm | `readySessionInstances: N` | Works, and is worth setting: your image must be pulled and booted. `0` is rejected (§3.3) |
+| Remove first-call latency | Cache the credential, reuse one HTTP client | **Highest value, zero cost** — removes ~5 s (§1.1) |
+| Remove the **slow tail** | Provisioned throughput (PTU) | The one that matters in production: 174 s → 30 s worst case (§1.6) |
+| Avoid `429`s under load | Size `maxConcurrentSessions` ≥ arrival rate × cooldown | The real constraint, not warmth (§1.4) |
+
+If capacity — not warmth — is the concern, size the pool: every distinct session
+identifier holds a slot for the **full cooldown period** (§1.4).
 
 ## 1.4 Custom container pool — capacity matters more than warmth
 
@@ -116,11 +148,12 @@ identifiers per user/thread rather than minting one per call. Pool creation take
 
 ## 1.5 Built-in Code Interpreter — where the seconds actually go
 
-> **Corrected 2026-08-06.** The original figures used the prompt
-> *"Use python to compute sum(range(100))"*. Re-testing proved the model answers
-> that **from memory and never calls the tool** (0/6 invocations), so those
-> numbers were partly plain model calls. Every figure below asserts a
-> `code_interpreter_call` in the response. See [`VALIDATION.md`](VALIDATION.md) §6.
+> **Measurement requirement.** A prompt the model can answer from memory —
+> *"Use python to compute sum(range(100))"* — **never fires the tool** (0/6
+> invocations here), so timings taken that way are really plain model calls.
+> Every figure below asserts a `code_interpreter_call` in the response. Use a
+> task the model cannot answer without executing, such as hashing a generated
+> string. See [`VALIDATION.md`](VALIDATION.md) §6.
 
 | Scenario | Latency (verified tool execution) |
 |---|---|
@@ -175,7 +208,7 @@ Two honest caveats:
    minutes every call failed with `400 Bad request for dependent service`.
    Provision ahead of a cutover; do not create it in a failover path.
 
-**Cost** (Azure retail price API, 2026-08-06): Global Provisioned Managed
+**Cost** (Azure retail price API, August 2026): Global Provisioned Managed
 **$1.00 / PTU / hour**, Regional $2.00, Data Zone $1.10. The 15 PTU minimum is
 therefore ~$15/hour (~$10.9k/month) pay-as-you-go, materially cheaper with a
 monthly reservation (~$260/PTU/month). A real budget decision, not a free switch.
@@ -403,9 +436,9 @@ Python session pool through MCP.
 | Managed pool via MCP agent | Python calculation | **2.85 s** | Passed |
 | Managed pool via MCP agent | Internet egress | **2.67 s** | Blocked |
 
-Re-measured 2026-08-06 using the documented `/executions` data-plane contract.
+Measured using the documented `/executions` data-plane contract.
 See §1.5 for the larger verified built-in sample (median 16.40 s, range
-4.55–103.28 s) and the methodology correction behind it.
+4.55–103.28 s) and the measurement requirement behind it.
 
 ## 3.2 Controlled custom image
 
@@ -461,9 +494,8 @@ a slow cold start.
 
 ## 3.5 Custom container MCP gap
 
-> Re-validated 2026-08-06 — see [`VALIDATION.md`](VALIDATION.md) §3. The original
-> evidence used PATCH, which is out of contract. Re-tested properly via PUT and
-> **upheld with high confidence**.
+> Verified via **PUT** (create-or-replace), which is the in-contract path for
+> this property — see [`VALIDATION.md`](VALIDATION.md) §3.
 
 The `Microsoft.App/SessionPoolsSupportMCP` feature was `Registered`. Even so, MCP
 could not be enabled on a custom container pool. The decisive test removed every

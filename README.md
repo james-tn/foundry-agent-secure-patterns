@@ -177,8 +177,7 @@ design around it — and each has a workaround.
 Tested along the fully documented path, with every variable removed:
 
 - **PUT** (create-or-replace), not PATCH — `mcpServerSettings` is absent from the
-  documented PATCH model, so our original PATCH-based finding was invalid and was
-  re-tested properly
+  documented PATCH model, so PUT is the only in-contract way to set it
 - API version **`2025-10-02-preview`** — the newest *published* preview
 - Image **`mcr.microsoft.com/k8se/services/codeinterpreter:0.9.18-python3.12`** —
   the exact image from Microsoft's official sample
