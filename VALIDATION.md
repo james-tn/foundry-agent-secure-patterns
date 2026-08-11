@@ -118,7 +118,7 @@ CustomContainer session pool**, even using Microsoft's own sample image and
 sample configuration.
 
 This **contradicts Microsoft's own published material**, which makes it a
-supportable escalation rather than a documentation-reading error on our side:
+reportable platform gap rather than a documentation-reading error:
 
 - ACA MCP overview states the platform-managed MCP server "exposes all three
   tools **regardless of the session pool's `containerType`**".
@@ -126,8 +126,8 @@ supportable escalation rather than a documentation-reading error on our side:
   `foundry-samples` Bicep set `containerType: 'CustomContainer'` **together
   with** `mcpServerSettings.isMcpServerEnabled: true`.
 
-Both cannot be true at once. Raise this with the product group with the trace
-IDs captured above.
+Both cannot be true at once. Report it through your Microsoft support channel
+with the trace IDs captured above.
 
 **Impact on the recommendation: none.** The Track C guidance already routes
 custom-container execution through the application's tool layer rather than
@@ -184,7 +184,7 @@ Re-measured on a different day with the latest SDK:
 
 **The headline conclusion stands: there is no evidence of agent de-allocation.**
 A ten-minute idle costs well under a second. The ~5 s felt as "cold start" is
-client-side credential and connection setup, fixable in the customer's own code
+client-side credential and connection setup, fixable in your own application code
 by caching the credential and reusing one long-lived client.
 
 ---
@@ -225,7 +225,7 @@ Container reuse was then tested explicitly, since it is the natural
 
 **Reusing the container does not help.** The cost is the extra model round-trips
 to author, execute and summarise the code — not sandbox startup. This directly
-answers the customer's "keep a few agents alive" question for the built-in tool:
+answers the "keep a few agents alive" question for the built-in tool:
 there is no warm-container knob, and pinning one manually buys nothing.
 
 Reliability, measured rather than anecdotal:
@@ -234,7 +234,7 @@ Reliability, measured rather than anecdotal:
 - In the final in-VNet demo run, **1 of 3** built-in calls failed with
   `APITimeoutError` after 90 s.
 
-Versus the customer-controlled pool in the same run: **0.076 s – 0.574 s**, with
+Versus the self-controlled pool in the same run: **0.076 s – 0.574 s**, with
 server-side execution of 8–286 ms.
 
 The original headline ("6–199 s with failures") was directionally right but

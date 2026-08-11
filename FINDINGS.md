@@ -198,7 +198,7 @@ The premise does not hold, so the answer is better than expected:
    concurrent-session exhaustion.
 
 There is still **no documented min-replica/keep-warm control for the prompt-agent
-data proxy** — an open question for the product group — but the data shows no
+data proxy** — an open question with the platform — but the data shows no
 user-visible penalty from its absence.
 
 ---
@@ -409,6 +409,10 @@ See §1.5 for the larger verified built-in sample (median 16.40 s, range
 
 ## 3.2 Controlled custom image
 
+"Controlled" here means a **`CustomContainer`** ACA dynamic session pool — an
+image you build and host in your own registry, rather than Microsoft's managed
+`PythonLTS` image. That is what makes package versions and egress provable.
+
 Derived from Microsoft's code-interpreter runtime with pinned packages:
 
 ```text
@@ -455,7 +459,7 @@ identifier per user or conversation, size `maxConcurrentSessions` against
 arrival rate × cooldown, and handle `429` explicitly rather than treating it as
 a slow cold start.
 
-## 3.5 Custom container MCP gap — escalation-worthy
+## 3.5 Custom container MCP gap
 
 > Re-validated 2026-08-06 — see [`VALIDATION.md`](VALIDATION.md) §3. The original
 > evidence used PATCH, which is out of contract. Re-tested properly via PUT and
@@ -482,8 +486,8 @@ POST .../fetchMCPServerCredentials
 
 An identical call against a managed Python pool returns `200 {"apiKey": ...}`.
 
-This **contradicts Microsoft's published material**, which is what makes it
-escalation-worthy rather than a misconfiguration:
+This **contradicts Microsoft's published material**, which is what makes it a
+platform gap rather than a misconfiguration:
 
 - The ACA MCP overview states the platform-managed MCP server exposes its tools
   "regardless of the session pool's `containerType`".

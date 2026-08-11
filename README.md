@@ -108,6 +108,26 @@ Evidence: [`FINDINGS.md`](FINDINGS.md) §1 (§1.6 for PTU)
 
 **A self-controlled ACA session pool wins decisively over the built-in tool.**
 
+> **What "controlled ACA pool" means.** An [Azure Container Apps *dynamic
+> session pool*](https://learn.microsoft.com/en-us/azure/container-apps/sessions)
+> that **you** create in **your own** subscription and attach to the agent as a
+> tool, instead of using Foundry's built-in Code Interpreter. Each run gets a
+> Hyper-V–isolated sandbox, but you own the container image, the installed
+> packages, the network policy, the CPU/memory size, concurrency and session
+> lifetime. The built-in Code Interpreter is the opposite trade-off: zero setup,
+> but Microsoft owns the image, the packages and the network posture — so you
+> cannot pin a library version or prove egress is blocked.
+>
+> There are two pool types, and the difference matters:
+>
+> | Pool type | Image | Choose when |
+> |---|---|---|
+> | `PythonLTS` (managed) | Microsoft's Python image | You want isolation and concurrency control, but not custom packages. **MCP works here** |
+> | `CustomContainer` | **Yours, from your registry** | You must pin versions, add private libraries, or prove egress is disabled |
+>
+> "Controlled" in this repo always means **`CustomContainer`** — our image pins
+> `polars`, `pyarrow` and `matplotlib`, and sets `EgressDisabled`.
+
 Same run, same environment:
 
 | | Controlled ACA pool | Built-in Code Interpreter |
@@ -146,9 +166,11 @@ three actual risks are different things with different fixes:
 The tail is the one that hurts in production, and it is **invisible in a POC that
 only measures averages**. A 5–10 s cold-start concern is real but misattributed.
 
-## Feedback for the product group
+## Platform notes and current limitations
 
-Three items worth routing to PG, in priority order.
+Four behaviours we hit that are **not obvious from the documentation**. None of
+them block the architecture in this repo, but each is worth knowing before you
+design around it — and each has a workaround.
 
 ### 1. MCP cannot be enabled on CustomContainer session pools — contradicts published docs
 
@@ -184,14 +206,21 @@ This contradicts Microsoft's own published material:
 Both cannot be true. Either the service is missing support or the docs and sample
 are wrong.
 
-### 2. API-version surface is confusing and partly unsupportable
+**What to do.** If you need MCP today, use a managed `PythonLTS` pool — MCP works
+there and is what this POC used for the agent-driven path. If you need custom
+packages *and* MCP, keep them separate: run the custom pool via the direct
+`/executions` data-plane call (0.08–0.72 s, shown above) and treat MCP as a
+managed-pool-only capability until this is resolved. Confirm current status with
+your Microsoft account team before committing a design to it.
+
+### 2. API versions: pin deliberately
 
 - `2026-03-02-preview` is **advertised by the resource provider** but is **not
   published** in `azure-rest-api-specs`. It is discoverable via `az provider show`
-  and will be pinned by customers who cannot then get support.
+  — **do not pin it**, as you may be unable to get support for it.
 - `mcpServerSettings` is annotated `@removed(Versions.v2026_01_01)`, so **MCP is
-  absent from the GA `2026-01-01` contract entirely**. Customers who standardise
-  on GA silently lose the capability.
+  absent from the GA `2026-01-01` contract entirely**. If you standardise on GA,
+  you lose the capability silently — pin a preview version where you need MCP.
 - Field casing is inconsistent between the spec (`isMcpServerEnabled`), the
   Foundry tutorial (`isMCPServerEnabled`), and an open specs PR (#42917) that
   cites "ACA backend response body casing does not match".
@@ -205,24 +234,35 @@ are wrong.
 
 Requested on every API version tried, via CLI and raw ARM. The property simply
 never appears in `scaleConfiguration`. **No error, no warning.** It is honoured
-on CustomContainer pools. Customers designing a warm-pool strategy around the
-built-in Python pool get nothing and are given no signal.
+on CustomContainer pools.
+
+**What to do.** Don't build a warm-pool strategy on the managed Python pool — you
+will get nothing and no signal that it was ignored. Always read the pool back
+after deployment and assert the property is present. In practice this matters
+less than expected: session start was ~0.36 s, so **concurrency sizing, not
+warmth, is the real lever** (see §3 above).
 
 Full detail and traces: [`VALIDATION.md`](VALIDATION.md)
 
-### 4. No support statement for agent tool traffic to on-prem
+### 4. On-premises connectivity is undocumented end to end — validate before committing
 
 Every building block is documented individually — network injection, peered
 VNets, ACA UDR/forced tunneling, Azure Firewall in the agent egress path, DNS
 Private Resolver. But nothing states that the **injected data proxy** honors
 custom VNet DNS / forwarding rulesets, or that agent OpenAPI tool calls over
 ExpressRoute/VPN to on-premises are supported. No documented limitation says
-otherwise either. Enterprises integrating existing on-prem systems — the common
-case — are left inferring supportability from ACA semantics. An explicit
-statement, or a reference architecture, would remove a real adoption blocker.
+otherwise either.
+
+**What to do.** The building blocks strongly suggest this works — the agent
+subnet is an ordinary delegated subnet with no route table restrictions — but we
+did not measure it, so treat it as **unverified**. If your internal APIs are
+on-premises or in a peered network, prove it with a spike before committing:
+deploy the stub API in this repo on the far side of the link and run the same
+test. Confirm supportability with your Microsoft account team.
 
 There is also no single authoritative "FQDNs a Foundry prompt agent must reach"
-list, which makes locked-down egress a trial-and-error exercise.
+list, which makes locked-down egress a trial-and-error exercise — budget time for
+it.
 
 ---
 

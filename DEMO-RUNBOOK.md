@@ -182,7 +182,7 @@ RESULT=PASSED
 
 The contrast lands on its own — same run, same tenant:
 
-| | Customer-controlled ACA pool | Built-in Code Interpreter |
+| | Self-controlled ACA pool | Built-in Code Interpreter |
 |---|---:|---:|
 | Latency | **0.08–0.72 s** | **15.2 s median** |
 | Package versions | Pinned by customer | Platform-controlled |
@@ -220,10 +220,10 @@ provisions `Succeeded` but `mcpServerSettings` stays `null` and
 `fetchMCPServerCredentials` returns `SessionMCPServerNotEnabled`. A PythonLTS
 pool returns an `apiKey` from the identical call.
 
-This contradicts Microsoft's own docs and sample, so present it as **an
-escalation we are raising**, with the workaround already in place: invoke the
-custom pool from the application's tool layer instead of server-side MCP. Their
-architecture does not change.
+This contradicts Microsoft's own docs and sample, so present it as **a known
+platform gap being followed up**, with the workaround already in place: invoke
+the custom pool from the application's tool layer instead of server-side MCP.
+Their architecture does not change.
 
 Also flag: `mcpServerSettings` is **absent from the GA `2026-01-01` contract**
 (`@removed`). Pin `2025-10-02-preview` if MCP is required, and do not pin
@@ -258,6 +258,6 @@ to become usable. Use the recorded numbers.
 
 Decide whether to keep the environment running. Idle cost is driven by Standard
 Azure AI Search, Cosmos DB, Premium ACR, private endpoints, Log Analytics, the
-two ready custom interpreter instances, and one ACA API replica. If the customer
-does not need a repeat demo, delete both resource groups named in
+two ready custom interpreter instances, and one ACA API replica. If you do not
+need a repeat demo, delete both resource groups named in
 `env.local` (`RG_SECURE` and `RG_LATENCY`).
