@@ -1,0 +1,6 @@
+langchain-azure-ai[hosting]>=1.2.8
+azure-ai-projects
+azure-cosmos
+langchain
+langchain-openai
+python-dotenv

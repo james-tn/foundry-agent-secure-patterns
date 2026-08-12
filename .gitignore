@@ -8,3 +8,6 @@ __pycache__/
 
 # Vendored reference templates
 vendor/
+
+# Stray build artifacts
+*.whl

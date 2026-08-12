@@ -152,6 +152,25 @@ Evidence: [`FINDINGS.md`](FINDINGS.md) §3
 
 ---
 
+## Requirement 4 — would hosted agents change any of this?
+
+The three requirements above were answered with **prompt agents**. The same
+three were then re-run with **hosted agents** (own code, LangGraph harness) in
+the same locked-down account.
+
+All three are achievable, but two differ enough to matter:
+
+| | Prompt agent | Hosted agent |
+|---|---|---|
+| VNet + internal API | Works; credential injected by the platform | Works, but the agent identity starts with **zero RBAC** and deployment is a **data-plane** operation, so CI/CD must run in-VNet |
+| Cold start | No measurable penalty | **~15 s per new session**, and `ACTIVE` does not mean ready to serve |
+| Code execution | Sandboxed pool, ~0.57–5.94 s | In-process, **0.15 ms**, but **no isolation** from the agent's own identity and secrets |
+
+Full requirement-by-requirement comparison, capability matrix and the twelve
+operational gotchas: [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)
+
+---
+
 ## The insight that matters most
 
 **"Keep the agents warm" optimizes the wrong variable.** It is a non-problem. The
@@ -282,6 +301,7 @@ it.
 |---|---|
 | [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) | **Standalone reusable guideline** — secure networking, internal/on-premises API access, latency, code execution. No environment specifics; safe to share as-is |
 | [`FINDINGS.md`](FINDINGS.md) | All measured evidence: cold start and PTU (§1), private networking (§2), code execution (§3), how to reproduce (§4) |
+| [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) | The same three requirements re-measured with **hosted agents** (LangGraph): comparison per requirement, capability matrix, operational gotchas |
 | [`VALIDATION.md`](VALIDATION.md) | Independent re-validation: SDK/API version audit, the two corrected conclusions, PTU measurement |
 | [`DEMO-RUNBOOK.md`](DEMO-RUNBOOK.md) | 60-minute session: agenda, commands, talking points, failure responses |
 | `track-b/`, `track-c/` | Deployment templates, stub API, and demo runners |
