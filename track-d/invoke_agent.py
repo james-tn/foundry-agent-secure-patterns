@@ -41,13 +41,19 @@ def agent_url(endpoint: str, agent: str, api_version: str) -> str:
 
 
 def invoke(url: str, token: str, prompt: str, timeout: int = 600):
-    body = json.dumps({"input": prompt}).encode()
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
-    )
+    payload = {"input": prompt}
+    metadata = os.environ.get("TRACKD_METADATA", "")
+    if metadata:
+        payload["metadata"] = json.loads(metadata)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    # TRACKD_HEADERS carries caller-supplied request context, e.g.
+    #   "x-client-tenant-id=contoso,x-client-correlation-id=abc-123"
+    for pair in os.environ.get("TRACKD_HEADERS", "").split(","):
+        if "=" in pair:
+            key, _, value = pair.partition("=")
+            headers[key.strip()] = value.strip()
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     started = time.time()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

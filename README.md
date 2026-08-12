@@ -155,16 +155,21 @@ Evidence: [`FINDINGS.md`](FINDINGS.md) §3
 ## Requirement 4 — would hosted agents change any of this?
 
 The three requirements above were answered with **prompt agents**. The same
-three were then re-run with **hosted agents** (own code, LangGraph harness) in
-the same locked-down account.
-
-All three are achievable, but two differ enough to matter:
+three — plus a fourth on request-context propagation — were then re-run with
+**hosted agents** (own code, LangGraph harness) in the same locked-down account.
 
 | | Prompt agent | Hosted agent |
 |---|---|---|
 | VNet + internal API | Works; credential injected by the platform | Works, but the agent identity starts with **zero RBAC** and deployment is a **data-plane** operation, so CI/CD must run in-VNet |
 | Cold start | No measurable penalty | **~15 s per new session**, and `ACTIVE` does not mean ready to serve |
 | Code execution | Sandboxed pool, ~0.57–5.94 s | In-process, **0.15 ms**, but **no isolation** from the agent's own identity and secrets |
+| Request context (identity, tenant, correlation) | No per-request channel to tools; per-user auth only via Toolbox/MCP | **`x-client-*` headers, `metadata` and W3C `traceparent` measured working end to end** |
+
+**On OBO:** neither agent type can perform a generic on-behalf-of exchange to an
+arbitrary internal API — the caller's `Authorization` header is never delivered
+to agent code. Per-user delegated access is available through **Toolbox/MCP
+connections** (`oauth2`, `user-entra-token`); anything else needs a token-broker
+or a server-side context store.
 
 Full requirement-by-requirement comparison, capability matrix and the twelve
 operational gotchas: [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)

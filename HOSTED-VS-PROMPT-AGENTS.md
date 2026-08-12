@@ -35,10 +35,11 @@ data from a stub API.
 2. [Requirement 1 — VNet isolation and internal API access](#2-requirement-1--vnet-isolation-and-internal-api-access)
 3. [Requirement 2 — cold start](#3-requirement-2--cold-start)
 4. [Requirement 3 — code execution](#4-requirement-3--code-execution)
-5. [Capability matrix](#5-capability-matrix)
-6. [Operational gotchas found the hard way](#6-operational-gotchas-found-the-hard-way)
-7. [Choosing between them](#7-choosing-between-them)
-8. [Reproducing](#8-reproducing)
+5. [Requirement 4 — request context propagation and OBO](#5-requirement-4--request-context-propagation-and-obo)
+6. [Capability matrix](#6-capability-matrix)
+7. [Operational gotchas found the hard way](#7-operational-gotchas-found-the-hard-way)
+8. [Choosing between them](#8-choosing-between-them)
+9. [Reproducing](#9-reproducing)
 
 ---
 
@@ -53,6 +54,7 @@ architecture review.
 | **1. VNet + internal APIs** | Managed runtime calls the API; connection secret injected by the data proxy | Your code calls the API from its own sandbox; you resolve the secret yourself | Both work. Hosted **needs an explicit RBAC grant** that prompt agents never needed |
 | **2. Cold start** | No measurable idle de-allocation penalty | **~15 s to provision every new session**, plus a slow first serving turn | **Materially worse.** This is the biggest surprise |
 | **3. Code execution** | Delegate to Code Interpreter or an ACA session pool | Run in-process — ~100,000× faster, but **no isolation** | Different trade, not strictly better |
+| **4. Request context propagation** | No per-request channel to tools; per-user auth only via Toolbox/MCP connections | **`x-client-*` headers, `metadata` and `traceparent` all measured working** | Hosted is clearly ahead. **Neither offers generic OBO** |
 
 **The three findings most worth raising in a design review:**
 
@@ -314,7 +316,200 @@ they add a fast path that is only appropriate for trusted code.
 
 ---
 
-# 5. Capability matrix
+# 5. Requirement 4 — request context propagation and OBO
+
+> *"Can hosted agents and prompt agents receive, store, and propagate
+> customer-defined request context (identity, tenant, correlation IDs) to
+> downstream tools and APIs, and what portion of that context can be
+> represented through OBO versus custom metadata/header propagation?"*
+
+**Short answer.** Hosted agents have a real, working context channel — measured
+end to end. Prompt agents do not expose an equivalent per-request channel to
+tools; their user-identity story runs through Toolbox/MCP connection auth
+instead. **Neither type gives you generic OBO to an arbitrary internal API**:
+the caller's `Authorization` header is deliberately never delivered to agent
+code.
+
+## 5.1 What actually arrives — measured
+
+A hosted agent was called with caller-supplied headers, a `metadata` object and
+a W3C `traceparent`. It echoed back everything the platform gave it
+**[Measured]**:
+
+```text
+client_headers: {'x-client-tenant-id': 'contoso-eu',
+                 'x-client-correlation-id': 'corr-12345',
+                 'x-client-end-user': 'alex@example.internal'}
+request_metadata: {'tenant': 'contoso-eu', 'request_id': 'req-999'}
+platform_user_id: <object-id of the calling principal>
+platform_call_id: proxy_90bf35b744e2290900uP7AV0Mgj...
+otel_span: {'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736', ...}
+```
+
+Four things are established by that single result:
+
+| Sent by caller | Reached agent code? | Label |
+|---|---|---|
+| `x-client-tenant-id`, `x-client-correlation-id`, `x-client-end-user` | **Yes** | [Measured] |
+| `x-custom-not-prefixed` (no `x-client-` prefix) | **No — silently dropped** | [Measured] |
+| Responses `metadata` object | **Yes**, verbatim | [Measured] |
+| `traceparent` | **Yes** — the agent's OTel span carried the *same* trace id `4bf92f35…4736` | [Measured] |
+
+The trace-id match is exact, so **W3C trace context genuinely propagates into
+the agent** rather than a new trace being started. Correlation across a
+distributed system therefore works without any custom plumbing.
+
+## 5.2 The allowlist is real, and `Authorization` never arrives
+
+Only the `x-client-` prefix passes. This is by design in the AgentServer wire
+contract (`azure.ai.agentserver.core.platform_headers`), and the measurement
+above confirms the ingress enforces it. Also never forwarded: `Authorization`,
+`Cookie`, `Host`, `x-forwarded-*` **[Documented]**.
+
+> **This is the crux of the OBO question.** Because hosted agent code never
+> receives the caller's bearer token, it cannot perform a standard Entra
+> on-behalf-of exchange with it. OBO to an arbitrary internal API is not
+> available by simply "passing the token through".
+
+## 5.3 Two platform identity signals, and a trap
+
+The platform injects two values **[Measured]**:
+
+- **`x-agent-user-id`** — a stable, cross-agent identifier for the **calling
+  principal**. Use it to partition per-user state.
+- **`x-agent-foundry-call-id`** — an opaque per-request call id. The container
+  **must forward it verbatim** on outbound calls to Foundry services (Toolbox/MCP,
+  Storage, A2A) so those services can resolve caller context server-side. Never
+  parse it **[Documented]**.
+
+> **The trap.** In this POC `x-agent-user-id` came back as the object id of the
+> **service identity that made the call**, not a human. If a web tier calls the
+> agent with its own managed identity — the normal enterprise pattern —
+> `x-agent-user-id` identifies **your application**, not the end user. It is not
+> an end-user identity unless end users authenticate to the agent endpoint
+> directly.
+
+The forwarding set a tool would send downstream, measured:
+
+```text
+{'x-client-tenant-id': 'contoso-eu',
+ 'x-client-correlation-id': 'corr-12345',
+ 'x-agent-foundry-call-id': 'proxy_9a787f2b66e89da600...'}
+```
+
+Note what this means: propagation to **your own** downstream APIs is something
+**your code does explicitly**. Nothing is auto-injected into arbitrary outbound
+HTTP calls.
+
+## 5.4 Prompt agents
+
+| Question | Answer | Label |
+|---|---|---|
+| Per-request custom headers into tool calls | **No documented mechanism** | [Documented — absence] |
+| Conversation/thread metadata | Yes: ≤16 pairs, key ≤64, value ≤512 chars | [Documented] |
+| Metadata auto-mapped into OpenAPI tool headers | **No** | [Documented — absence] |
+| Direct OpenAPI tool auth options | anonymous, connection (key/token), managed identity — **no user-token option** | [Documented] |
+| Per-user auth via MCP/Toolbox connections | **Yes** — `oauth2` and `user-entra-token` | [Documented] |
+| W3C trace context into every tool call | Not guaranteed | [Unknown] |
+
+So a prompt agent *can* act with a **specific user's** delegated permissions —
+but only through **Toolbox/MCP connections**, where Foundry manages consent,
+storage, refresh and injection. It cannot take a correlation id you supplied on
+this request and put it in an outbound API header.
+
+Passing context through the prompt is **not** a propagation mechanism: it has no
+integrity, is visible to the model, and is subject to prompt injection. Never use
+it for anything security-relevant.
+
+## 5.5 On OBO specifically — what "Agent ID" does and does not mean
+
+**Microsoft Entra Agent ID is an identity *for the agent*, not a carrier of the
+user's identity** **[Documented]**. It supports two token shapes: autonomous
+(subject = agent) and delegated (subject = user, **actor** = agent). Entra does
+document an agent OBO flow, where a blueprint identity exchanges a user
+assertion for a downstream token.
+
+The gap is delivery: **Foundry does not hand your agent a user assertion.**
+Therefore, of the customer's context list:
+
+| Context | Representable via OBO | Representable via metadata/headers |
+|---|---|---|
+| **Correlation / trace ids** | n/a | **Yes** — `x-client-*` and `traceparent` [Measured] |
+| **Tenant id** | Indirectly, as a token claim | **Yes**, but **untrusted** — it is caller-asserted |
+| **End-user identity** | **Only** via Toolbox `oauth2` / `user-entra-token`, or your own broker | Only as an **unverified claim** |
+
+**Rule of thumb:** headers and metadata are fine for *routing, logging and
+correlation*. They are **not** an authorization mechanism, because anything the
+caller asserts, the caller can forge.
+
+## 5.6 Recommended patterns
+
+Where the platform stops, these fill the gap. Ordered by preference.
+
+**1. Toolbox / MCP connection auth — use this first where it fits.**
+Configure the connection as `oauth2` or `user-entra-token`. Foundry handles
+consent, token storage, refresh and injection, for both agent types. Nothing
+sensitive touches model-visible state.
+
+**2. Token-exchange broker for custom internal APIs.**
+A small confidential-client service that the agent calls with its own managed
+identity plus the `x-agent-foundry-call-id`/session context. The broker
+authenticates the *caller*, looks up the authoritative user binding, performs the
+Entra OBO exchange, and either returns a **narrowly scoped, short-lived** token
+or — better — performs the downstream call itself. This keeps user credentials
+out of the agent process entirely.
+
+**3. Server-side context store keyed by session and platform user id.**
+Your front door writes authoritative context (real end-user id, tenant,
+entitlements) into a store keyed by `(agent_session_id, x-agent-user-id)` before
+invoking the agent; the agent reads it. Because the agent never trusts a
+caller-asserted value, forgery is not possible. This POC already demonstrated the
+storage half — private-endpoint Cosmos, keyless, ~745 ms write (§6.1).
+
+**4. `x-client-*` headers for non-authoritative context.**
+Correlation ids, locale, feature flags, request tags. Cheap, measured to work.
+Validate on arrival; never authorize on it.
+
+**5. Egress gateway or sidecar** for deterministic header injection, destination
+allowlisting and audit — useful given that agent-sandbox egress is otherwise
+unrestricted (§2.4).
+
+**Explicitly do not:** pass an end-user bearer token as a tool parameter or in
+model-visible content. It leaks into traces, logs, retries and conversation
+history, and is reachable by any code the agent executes (§4.2).
+
+## 5.7 Reference architecture
+
+```text
+end user ──auth──> your web/API tier ──────────────────────────────┐
+                        │ (validates user, mints correlation id)    │
+                        │                                           │
+                        ├─ writes authoritative context ──> context store
+                        │     key: (agent_session_id, user)         │
+                        │                                           ▼
+                        └─ POST /agents/{name}/endpoint/...  Foundry ingress
+                             x-client-correlation-id: ...      (strips Authorization,
+                             traceparent: ...                   keeps x-client-*,
+                             metadata: {...}                    injects call id + user id)
+                                                                   │
+                                                                   ▼
+                                                            hosted agent code
+                                                    reads client_headers + context store
+                                                                   │
+                              ┌────────────────────────────────────┼───────────────┐
+                              ▼                                    ▼               ▼
+                    Toolbox / MCP tool                    token broker        internal API
+               (per-user oauth2 / entra token)        (Entra OBO exchange)  (correlation hdrs)
+                    forward x-agent-foundry-call-id
+```
+
+**Split of responsibilities.** Correlation and tracing: the platform, measured
+working. Authoritative identity and tenant: your context store or broker. Never
+the prompt.
+
+---
+
+# 6. Capability matrix
 
 | Capability | Prompt agent | Hosted agent | Label |
 |---|---|---|---|
@@ -336,8 +531,14 @@ they add a fast path that is only appropriate for trusted code.
 | **Foundry Memory** | Supported | Supported, but **memory stores lack VNet integration** | [Documented] |
 | **BYO Cosmos wiring for hosted threads** | Documented containers | **Mapping undocumented** | [Unknown] |
 | **Observability** | Portal + tracing | Same, plus your own logs; container log stream is essential | [Measured] |
+| **Custom request headers to agent** | No documented mechanism | **`x-client-*` only**; others dropped | [Measured] |
+| **Request `metadata` to agent code** | Conversation metadata (≤16 pairs) | **Yes**, verbatim | [Measured] |
+| **W3C trace context into the agent** | Not guaranteed | **Yes** — same trace id end to end | [Measured] |
+| **Caller `Authorization` visible to agent** | n/a | **No — always stripped** | [Measured] |
+| **Per-user delegated auth (OBO)** | Toolbox/MCP `oauth2`, `user-entra-token` | Same, via Toolbox | [Documented] |
+| **Generic OBO to an arbitrary internal API** | No | No — needs a broker | [Documented] |
 
-## 5.1 State — measured, over the private endpoint
+## 6.1 State — measured, over the private endpoint
 
 The hosted agent wrote and read its own state in a Cosmos account with
 `publicNetworkAccess=Disabled`, `disableLocalAuth=true`, using **its own managed
@@ -356,7 +557,7 @@ Foundry-managed BYO thread store.
 
 ---
 
-# 6. Operational gotchas found the hard way
+# 7. Operational gotchas found the hard way
 
 Each of these cost real time and none is obvious from the documentation.
 
@@ -388,7 +589,7 @@ connections.get(name, include_credentials=True)
 
 ---
 
-# 7. Choosing between them
+# 8. Choosing between them
 
 **Prefer prompt agents when** the requirement is a governed, network-isolated
 agent calling internal APIs and running code in a provable sandbox. Everything
@@ -420,7 +621,7 @@ harness.
 
 ---
 
-# 8. Reproducing
+# 9. Reproducing
 
 Everything runs through one script, because the data plane is unreachable from
 outside the VNet:
@@ -448,6 +649,12 @@ export AZ_SUBSCRIPTION=<subscription-id>
 
 # clean up sessions (dry run by default)
 ./track-d/run-in-vnet.sh cleanup_sessions.py TRACKD_CLEANUP_APPLY=1
+
+# requirement 4 - what request context survives the ingress
+./track-d/run-in-vnet.sh invoke_agent.py TRACKD_AGENT_NAME=<agent> \
+    TRACKD_PROMPT="Call echo_request_context and report the raw JSON." \
+    'TRACKD_HEADERS=x-client-tenant-id=contoso,x-client-correlation-id=corr-1,traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' \
+    'TRACKD_METADATA={"tenant":"contoso"}'
 ```
 
 | Agent | Source | Demonstrates |
@@ -455,6 +662,7 @@ export AZ_SUBSCRIPTION=<subscription-id>
 | `agent-src/` | LangGraph chat + calculator | Deployability, invocation, cold start |
 | `agent-src-api/` | Envelope status tool | Requirement 1 — private API + credential resolution |
 | `agent-src-exec/` | `run_python`, context probe, Cosmos state | Requirements 3 and state |
+| `agent-src-ctx/` | Echoes `client_headers`, `metadata`, platform ids, trace | Requirement 4 — context propagation |
 
 > Job environment variables are **sticky** between runs — `run-in-vnet.sh`
 > patches the job definition, so a value set once persists until overwritten.
