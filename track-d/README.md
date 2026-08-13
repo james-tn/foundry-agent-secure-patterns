@@ -36,6 +36,7 @@ variable you care about on every run.
 | `discover_invoke.py` | Probe that found the invoke route and api-version |
 | `gateway_probe.py` | Requirement 5: native non-OpenAI models, and what `model` will not accept |
 | `gateway_agent_probe.py` | Requirement 5: BYOM through a `ModelGateway` connection on the v2 agents API |
+| `fs_memory_probe.py` | Requirement 6: is the sandbox filesystem memory? Three turns across two conversations |
 
 ## Agents
 
@@ -46,6 +47,7 @@ variable you care about on every run.
 | `agent-src-exec/` | In-process code execution, context probe, Cosmos state |
 | `agent-src-ctx/` | Request context, `metadata` and `traceparent` propagation |
 | `agent-src-gw/` | Calling a customer LLM gateway directly via `base_url` |
+| `agent-src-plat/` | Requirement 6: custom telemetry and metrics, DSPy, filesystem, runtime inventory |
 
 ## Gateway
 

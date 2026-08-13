@@ -1,0 +1,13 @@
+langchain-azure-ai[hosting]>=1.2.8
+azure-ai-projects
+langchain
+langchain-openai
+python-dotenv
+
+# Requirement 6: customer telemetry, emitted by the customer's own code.
+azure-monitor-opentelemetry
+opentelemetry-api
+opentelemetry-sdk
+
+# Requirement 6: an arbitrary third-party prompt-optimisation library.
+dspy-ai

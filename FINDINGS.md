@@ -493,7 +493,38 @@ identifier per user or conversation, size `maxConcurrentSessions` against
 arrival rate × cooldown, and handle `429` explicitly rather than treating it as
 a slow cold start.
 
-## 3.5 Custom container MCP gap
+## 3.5 Multi-language execution
+
+Asking the resource provider to create a pool with an invalid container type
+makes it enumerate the valid ones:
+
+```
+Invalid container type 'BogusLang'. Valid types are:
+[PythonLTS, CustomContainer, NodeLTS, GpuBase, CsharpLTS, Shell]
+```
+
+`CsharpLTS` and `GpuBase` do not appear in the public documentation. Two types
+were taken past creation and actually executed code:
+
+| Pool type | Result |
+|---|---|
+| `NodeLTS` | Executed JavaScript — Node **v20.17.0**, linux/x64, 5 ms |
+| `Shell` | Ubuntu **22.04.5** with `python3`, `node` v20.17.0, **`java`** and `gcc` |
+| `CsharpLTS` | Valid type, but **not enabled in `eastus2`** (`SessionTypeNotSupportedInRegion`) |
+
+A `Shell` pool is the broadest answer to a multi-language requirement: one
+sandbox with Python, Node, Java and a C compiler, driven by arbitrary shell
+commands.
+
+> **Shell pools use a different request shape.** `codeInputType` / `code` is
+> rejected with `SessionPropertiesMissing`. Use `shellCommand` with
+> `api-version=2025-02-02-preview`; older versions report *"Shell execution is
+> not supported in API version 2023-08-01-preview"* even when a newer version
+> was requested.
+
+Foundry's built-in Code Interpreter tool remains Python-only.
+
+## 3.6 Custom container MCP gap
 
 > Verified via **PUT** (create-or-replace), which is the in-contract path for
 > this property — see [`VALIDATION.md`](VALIDATION.md) §3.

@@ -152,12 +152,13 @@ Evidence: [`FINDINGS.md`](FINDINGS.md) §3
 
 ---
 
-## Requirements 4 and 5 — would hosted agents change any of this?
+## Requirements 4 to 6 — would hosted agents change any of this?
 
 The three requirements above were answered with **prompt agents**. The same
-three — plus two more, on request-context propagation and on using an existing
-multi-provider LLM gateway — were then re-run with **hosted agents** (own code,
-LangGraph harness) in the same locked-down account.
+three — plus later ones on request-context propagation, using an existing
+multi-provider LLM gateway, and a follow-up list covering telemetry, library
+integration and filesystem memory — were then re-run with **hosted agents**
+(own code, LangGraph harness) in the same locked-down account.
 
 | | Prompt agent | Hosted agent |
 |---|---|---|
@@ -166,6 +167,9 @@ LangGraph harness) in the same locked-down account.
 | Code execution | Sandboxed pool, ~0.57–5.94 s | In-process, **0.15 ms**, but **no isolation** from the agent's own identity and secrets |
 | Request context (identity, tenant, correlation) | No per-request channel to tools; per-user auth only via Toolbox/MCP | **`x-client-*` headers, `metadata` and W3C `traceparent` measured working end to end** |
 | Existing LLM gateway (multi-provider) | Needs an admin-created **`ModelGateway`** connection; model is `<connection>/<model>` | Set `base_url` in your own client — no connection, and no governance either |
+| Custom telemetry and metrics | Microsoft's traces only; instrument the **caller** | **Custom spans and metrics measured landing in App Insights** with DocuSign dimensions |
+| Prompt-optimisation libraries (DSPy) | Not possible inside the loop | **DSPy 3.3.0 installed and ran** against the Foundry model |
+| Filesystem memory | n/a | Writable 4.1 GB disk; **persists per conversation, not across them** |
 
 **On OBO:** neither agent type can perform a generic on-behalf-of exchange to an
 arbitrary internal API — the caller's `Authorization` header is never delivered
@@ -182,6 +186,17 @@ were measured working against a real gateway deployed in the VNet, including
 tool calling. The trap: Foundry's BYOM path **always requests streaming**, so a
 gateway that only speaks non-streaming JSON fails with an opaque `500`.
 
+**On the follow-up requirements:** custom telemetry, DSPy and filesystem memory
+were measured directly. A hosted agent emitted its own OpenTelemetry span and
+metrics with DocuSign dimensions and both were queried back out of Application
+Insights; **DSPy 3.3.0** installed and ran a real program against the Foundry
+model; and the sandbox has a writable 4.1 GB disk that **persists across
+chained turns but not across conversations** — short-term memory yes, long-term
+memory no. All three are hosted-agent-only. Multi-language execution lives in
+session pools, where the resource provider accepts `PythonLTS`, `NodeLTS`,
+`Shell`, `CsharpLTS`, `GpuBase` and `CustomContainer` — the last two of which
+are undocumented.
+
 **The gateway can be the customer's own, and can stay private.** It does not
 have to be Azure API Management or any Azure product — the one measured here is
 a stdlib-only Python server, and the connection simply takes its URL. It also
@@ -189,7 +204,7 @@ resolved to a **private IP** inside the VNet, unreachable from the public
 internet, and Foundry reached it regardless. The full endpoint contract is in
 [`FINDINGS.md`](FINDINGS.md) §4.5.
 
-Full requirement-by-requirement comparison, capability matrix and the seventeen
+Full requirement-by-requirement comparison, capability matrix and the twenty-one
 operational gotchas: [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)
 
 ---
@@ -323,8 +338,8 @@ it.
 | File | Contents |
 |---|---|
 | [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) | **Standalone reusable guideline** — secure networking, internal/on-premises API access, latency, code execution. No environment specifics; safe to share as-is |
-| [`FINDINGS.md`](FINDINGS.md) | All measured evidence: cold start and PTU (§1), private networking (§2), code execution (§3), how to reproduce (§4) |
-| [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) | All five requirements re-measured with **hosted agents** (LangGraph): comparison per requirement, request-context propagation, multi-provider LLM gateway, capability matrix, operational gotchas |
+| [`FINDINGS.md`](FINDINGS.md) | All measured evidence: cold start and PTU (§1), private networking (§2), code execution and multi-language pools (§3), LLM gateway (§4), how to reproduce (§5) |
+| [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) | All six requirements re-measured with **hosted agents** (LangGraph): comparison per requirement, request-context propagation, multi-provider LLM gateway, capability matrix, operational gotchas |
 | [`VALIDATION.md`](VALIDATION.md) | Independent re-validation: SDK/API version audit, the two corrected conclusions, PTU measurement |
 | [`DEMO-RUNBOOK.md`](DEMO-RUNBOOK.md) | 60-minute session: agenda, commands, talking points, failure responses |
 | `track-b/`, `track-c/` | Deployment templates, stub API, and demo runners |

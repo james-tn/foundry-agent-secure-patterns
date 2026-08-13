@@ -37,18 +37,19 @@ data from a stub API.
 4. [Requirement 3 — code execution](#4-requirement-3--code-execution)
 5. [Requirement 4 — request context propagation and OBO](#5-requirement-4--request-context-propagation-and-obo)
 6. [Requirement 5 — using an existing multi-provider LLM gateway](#6-requirement-5--using-an-existing-multi-provider-llm-gateway)
-7. [Capability matrix](#7-capability-matrix)
-8. [Operational gotchas found the hard way](#8-operational-gotchas-found-the-hard-way)
-9. [Choosing between them](#9-choosing-between-them)
-10. [Reproducing](#10-reproducing)
+7. [Requirement 6 — platform capabilities](#7-requirement-6--platform-capabilities)
+8. [Capability matrix](#8-capability-matrix)
+9. [Operational gotchas found the hard way](#9-operational-gotchas-found-the-hard-way)
+10. [Choosing between them](#10-choosing-between-them)
+11. [Reproducing](#11-reproducing)
 
 ---
 
 # 1. Executive summary
 
-All five requirements are satisfiable in a fully private account. Several are
-satisfied *differently* enough between the two agent types to change an
-architecture review.
+All requirements raised so far are satisfiable in a fully private account.
+Several are satisfied *differently* enough between the two agent types to
+change an architecture review — and two of them point in opposite directions.
 
 | Requirement | Prompt agent | Hosted agent | Verdict |
 |---|---|---|---|
@@ -57,8 +58,12 @@ architecture review.
 | **3. Code execution** | Delegate to Code Interpreter or an ACA session pool | Run in-process — ~100,000× faster, but **no isolation** | Different trade, not strictly better |
 | **4. Request context propagation** | No per-request channel to tools; per-user auth only via Toolbox/MCP connections | **`x-client-*` headers, `metadata` and `traceparent` all measured working** | Hosted is clearly ahead. **Neither offers generic OBO** |
 | **5. Existing LLM gateway** | Needs an admin-created **`ModelGateway` connection**; model is `<connection>/<model>` | Just set `base_url` in your own client | Both work. **Gemini is not in the Azure catalog**, so a gateway is the only route to it |
+| **6a. Custom telemetry & metrics** | Microsoft's traces only; instrument the *caller* | **Custom spans and metrics measured landing in App Insights** | Hosted only |
+| **6b. Library integration (DSPy)** | Not possible in the loop | **DSPy 3.3.0 installed and ran** | Hosted only |
+| **6c. Filesystem memory** | n/a | Writable 4.1 GB disk, **persists per conversation, not across them** | Short-term yes, long-term no |
+| **6d. Multi-language execution** | Session pools: Node, Shell, C#, GPU, custom | Same pools; runtime itself is Python | Both, via pools |
 
-**The four findings most worth raising in a design review:**
+**The five findings most worth raising in a design review:**
 
 1. **Hosted agents ship with zero RBAC.** The platform creates two Entra
    identities per agent and grants them **nothing**. Anything the agent needs —
@@ -78,6 +83,12 @@ architecture review.
    offered in `eastus2` — Anthropic, Meta, Mistral, DeepSeek, xAI and others —
    but **no Google**. Every other named provider can be used natively without a
    gateway; Gemini can only be reached *through* one. §6.2.
+5. **The new requirements split the decision.** Custom telemetry from inside
+   the agent, DSPy, and filesystem working memory are **hosted-agent-only**
+   capabilities. But enforcing the LLM gateway as a governed control point is
+   **prompt-agent-only**, because a hosted agent can point `base_url` anywhere.
+   These pull in opposite directions and the resolution is a design decision,
+   not a measurement. §7.7.
 
 ---
 
@@ -470,7 +481,7 @@ Your front door writes authoritative context (real end-user id, tenant,
 entitlements) into a store keyed by `(agent_session_id, x-agent-user-id)` before
 invoking the agent; the agent reads it. Because the agent never trusts a
 caller-asserted value, forgery is not possible. This POC already demonstrated the
-storage half — private-endpoint Cosmos, keyless, ~745 ms write (§7.1).
+storage half — private-endpoint Cosmos, keyless, ~745 ms write (§8.1).
 
 **4. `x-client-*` headers for non-authoritative context.**
 Correlation ids, locale, feature flags, request tags. Cheap, measured to work.
@@ -817,7 +828,220 @@ uninformative `500`.
 
 ---
 
-# 7. Capability matrix
+# 7. Requirement 6 — platform capabilities
+
+The follow-up list restated three requirements already answered above and added
+three new ones. Coverage first, so nothing is re-litigated:
+
+| Requirement | Status |
+|---|---|
+| Agent execution & control | Answered — §2–§6 and §10; this *is* the hosted-vs-prompt distinction |
+| LLM gateway | Answered — §6 |
+| Code execution | Answered — §4, extended below with **multi-language** |
+| **Telemetry & metrics injection** | **New — measured below** |
+| **Library integration (DSPy)** | **New — measured below** |
+| **Filesystem access for short/long-term memory** | **New — measured below** |
+| IP protection | Partly answered — §2; consolidated below |
+
+## 7.1 Result
+
+| Question | Prompt agent | Hosted agent | Label |
+|---|---|---|---|
+| Emit **custom OTel spans** with customer dimensions | From the *calling app* only | **Yes, from inside the agent** | [Measured] |
+| Emit **custom OTel metrics** | No — Microsoft owns the loop | **Yes** | [Measured] |
+| Export telemetry to a **non-Azure** backend (Datadog, OTLP) | No | **Yes** | [Documented] |
+| Install an arbitrary PyPI library (DSPy) | No | **Yes — DSPy 3.3.0 ran** | [Measured] |
+| Run **non-Python** code | Via session pools | Via session pools | [Measured] |
+| Writable filesystem in the agent runtime | n/a | **Yes, 4.1 GB** | [Measured] |
+| Filesystem as **short-term** memory | n/a | **Yes, per conversation** | [Measured] |
+| Filesystem as **long-term** memory | n/a | **No — needs an external store** | [Measured] |
+
+## 7.2 Telemetry — the sharpest split in the whole comparison
+
+A hosted agent emitted a customer-defined span **and** customer-defined metrics
+carrying DocuSign's own dimensions, and both were queried back out of
+Application Insights:
+
+| Signal | Name | Dimensions that survived |
+|---|---|---|
+| Span (`dependency`) | `docusign.envelope.validate` | `docusign.marker`, `docusign.envelope_id`, `docusign.tenant` |
+| Counter (`customMetric`) | `docusign.envelopes.processed` | `docusign.marker` |
+| Histogram (`customMetric`) | `docusign.envelope.latency` | `docusign.marker` |
+
+`force_flush` returned success, so telemetry is queryable within seconds rather
+than waiting on process shutdown. [Measured]
+
+Two useful details about the sandbox:
+
+* `APPLICATIONINSIGHTS_CONNECTION_STRING` **and** `AZURE_MONITOR_DISTRO_VERSION`
+  are already present, so the OpenTelemetry distro is pre-wired by the platform
+  and standard OTel APIs are picked up without the agent configuring an
+  exporter. `OTEL_SERVICE_NAME` and `FOUNDRY_AGENT365_TRACING_ENABLED` are set
+  too. [Measured]
+* Hosted agents can additionally export to any OTLP endpoint via
+  `OTEL_EXPORTER_OTLP_*`, including a self-hosted collector or Datadog —
+  relevant if DocuSign's observability stack is not Azure Monitor.
+  [Documented]
+
+**For prompt agents the honest answer is different.** Foundry emits rich
+server-side traces, but Microsoft owns the loop, so DocuSign's own code is not
+running inside it. Custom instrumentation happens in the *calling* application,
+where W3C `traceparent` propagation correlates the client span with the Foundry
+run. There is **no documented way to attach arbitrary customer dimensions to
+Microsoft's server spans, and no way to emit custom metrics from inside a
+prompt-agent run.** [Documented / Not documented]
+
+> If "inject DocuSign telemetry and metrics" means *from inside the agent*,
+> that is a hosted-agent capability. Prompt agents give you Microsoft's
+> telemetry plus whatever you record around the call.
+
+## 7.3 DSPy and arbitrary libraries
+
+`dspy-ai` was added to `requirements.txt`, deployed, and then *executed* — the
+test deliberately runs a real DSPy program rather than only importing it:
+
+| Check | Result |
+|---|---|
+| Version resolved | **DSPy 3.3.0** |
+| Program | `dspy.Predict("question -> answer")` |
+| Answer | `Paris` |
+| Latency | 3 966 ms |
+
+DSPy drives the model itself through LiteLLM, so this also proves an arbitrary
+library can **own the model call** inside the sandbox — not just sit alongside
+it. That is the pattern prompt optimisation needs. [Measured]
+
+The sandbox is Python **3.13.14** on Debian, 1 vCPU, and `pip` resolves from
+the public index at build time. DSPy is not mentioned anywhere in Foundry's
+documentation — it works because the sandbox is a normal Python environment,
+not because it is a supported integration. [Measured]
+
+**Prompt agents cannot do this at all.** There is no dependency manifest,
+because there is no customer process. The escape hatch is to run the library in
+a session pool or an Azure Function and expose it as a tool — which means DSPy
+would optimise prompts *outside* the agent and hand results in.
+
+## 7.4 Multi-language execution
+
+The agent runtime and the code sandbox are different questions, and the answers
+differ.
+
+**The hosted agent runtime is Python-only in practice.** Probing the sandbox
+for other runtimes returned nothing:
+
+| Runtime | Present |
+|---|---|
+| `python3` | **3.13.14** |
+| `gcc` | 12.2.0 |
+| `bash` | 5.2.15 |
+| `node`, `npm`, `dotnet`, `java`, `go` | **absent** |
+
+Subprocess execution *is* allowed. Microsoft documents Python and C# protocol
+libraries, plus BYO container images if another runtime is required.
+[Measured / Documented]
+
+**Code execution is where multi-language actually lives.** Asking the resource
+provider for an invalid pool type makes it list the valid ones:
+
+```
+Valid types are: [PythonLTS, CustomContainer, NodeLTS, GpuBase, CsharpLTS, Shell]
+```
+
+`CsharpLTS` and `GpuBase` are **not in the public documentation**. [Measured]
+
+Two were taken further than creation:
+
+| Pool type | Result |
+|---|---|
+| `NodeLTS` | Created and **executed JavaScript** — Node v20.17.0, 5 ms |
+| `Shell` | Created and ran shell commands — Ubuntu 22.04.5 with `python3`, `node` v20.17.0, **`java`** and `gcc` present |
+| `CsharpLTS` | Type is valid but **not enabled in `eastus2`** (`SessionTypeNotSupportedInRegion`) |
+
+The `Shell` pool is the most interesting result for a multi-language
+requirement: one sandbox with Python, Node, Java and a C compiler, driven by
+arbitrary shell commands.
+
+> **Shell pools use a different request shape.** `codeInputType` / `code` is
+> rejected with `SessionPropertiesMissing`; use `shellCommand` on
+> `api-version=2025-02-02-preview`. Older API versions report
+> *"Shell execution is not supported in API version 2023-08-01-preview"* even
+> when you asked for a newer one. [Measured]
+
+Foundry's built-in Code Interpreter tool remains **Python-only**. [Documented]
+
+## 7.5 Filesystem, and what "memory" really means
+
+The hosted sandbox has a writable disk:
+
+| Path | Writable | Note |
+|---|---|---|
+| `/home/session` | Yes | **3.9 GB free — a separate volume** |
+| `/tmp`, `/mnt/data`, `/var/agent-state` | Yes | 2.9 GB free, same volume |
+| `/app` | **No** | read-only (`Errno 30`) — your code cannot rewrite itself |
+
+The important question is not "is there a disk" but "does the next turn land on
+the same one". Running the same probe three times answers it:
+
+| Turn | Conversation | Sandbox instance | Saw earlier writes | Latency |
+|---|---|---|---|---|
+| 1 | new | `ddf9dde2` | — | 31.0 s |
+| 2 | **chained** (`previous_response_id`) | **`ddf9dde2`** | **yes** | **14.0 s** |
+| 3 | new | `1ada359b` | **no** | 31.2 s |
+
+So the filesystem is **conversation-scoped**. [Measured]
+
+* **Short-term memory via filesystem: yes.** Within a conversation the disk
+  persists, and the warm turn is also less than half the latency.
+* **Long-term memory via filesystem: no.** A new conversation gets a new
+  sandbox and an empty disk. Anything that must outlive a conversation belongs
+  in Cosmos DB, Azure Storage or Foundry Memory.
+
+Microsoft documents session storage as surviving the 15-minute idle timeout and
+being deleted after **30 days of inactivity**, with up to 20 GiB at 1 vCPU or
+larger. Treat it as a durable cache keyed by conversation, not a system of
+record. There is **no documented Azure Files or persistent-volume mount**.
+[Documented / Not documented]
+
+## 7.6 IP protection — where DocuSign data actually sits
+
+Mostly a consolidation of §2 plus Microsoft's published commitments.
+
+| Asset | Where it lives | Label |
+|---|---|---|
+| Prompts & completions | Not used to train foundation models; not shared with model providers | [Documented] |
+| Threads, messages, files, vector stores | **Customer's own** Cosmos DB, Storage and AI Search under Standard Agent Setup | [Documented] |
+| Agent state (this POC) | Customer Cosmos DB, reached over a private endpoint | [Measured, §8.1] |
+| Network path | No public egress required; internal APIs reached privately | [Measured, §2] |
+| Encryption | AES-256 at rest, optional CMK — **preview features may not support CMK** | [Documented] |
+| Hosted agent **source code** | Uploaded as a ZIP; **physical store, retention and CMK support are not documented** | [Not documented] |
+
+Two items worth raising on the call rather than burying:
+
+* **Abuse monitoring may retain content for human review.** Eligible customers
+  can apply for **modified abuse monitoring** through the Limited Access
+  process, which removes human review and its storage. For a company handling
+  signature documents this is usually the first thing legal asks about.
+  [Documented]
+* **Hosted-agent code confidentiality is not documented.** Microsoft documents
+  *that* a ZIP is uploaded, but not where it is stored, how long it is kept
+  after deletion, whether CMK applies, or which personnel can access it. If
+  agent code is itself DocuSign IP, the **BYO container image** path is the
+  safer answer, because the image stays in DocuSign's own registry and Foundry
+  pulls it. [Not documented / Documented]
+
+## 7.7 Recommendation for these three new requirements
+
+Custom telemetry from inside the agent, DSPy, and filesystem working memory are
+**all hosted-agent capabilities and none of them are prompt-agent
+capabilities**. Combined with §6, where the gateway argument ran the other way,
+the honest summary is that these requirements pull in opposite directions:
+
+* Telemetry, DSPy and filesystem memory → **hosted agents**.
+* Enforcing the LLM gateway as a control point → **prompt agents**.
+
+That tension is the real decision, and §10 covers it.
+
+# 8. Capability matrix
 
 | Capability | Prompt agent | Hosted agent | Label |
 |---|---|---|---|
@@ -849,9 +1073,21 @@ uninformative `500`.
 | **W3C trace context into the agent** | Not guaranteed | **Yes** — same trace id end to end | [Measured] |
 | **Caller `Authorization` visible to agent** | n/a | **No — always stripped** | [Measured] |
 | **Per-user delegated auth (OBO)** | Toolbox/MCP `oauth2`, `user-entra-token` | Same, via Toolbox | [Documented] |
+| **Custom OTel spans from inside the agent** | **No** — instrument the caller | **Yes**, with customer dimensions | [Measured] |
+| **Custom OTel metrics from inside the agent** | **No** | **Yes** — counter and histogram measured | [Measured] |
+| **Export telemetry to non-Azure backend** | No | **Yes** via `OTEL_EXPORTER_OTLP_*` | [Documented] |
+| **Arbitrary PyPI libraries (DSPy)** | **No** | **Yes** — DSPy 3.3.0 ran a real program | [Measured] |
+| **Agent runtime language** | n/a | **Python-only in practice**; Python/C# documented, or BYO image | [Measured] |
+| **Session pool languages** | `PythonLTS`, `NodeLTS`, `Shell`, `CsharpLTS`, `GpuBase`, `CustomContainer` | Same | [Measured] |
+| **Built-in Code Interpreter language** | **Python only** | n/a | [Documented] |
+| **Writable filesystem in agent runtime** | n/a | **Yes** — 4.1 GB; `/app` read-only | [Measured] |
+| **Filesystem persists across chained turns** | n/a | **Yes** — same sandbox | [Measured] |
+| **Filesystem persists across conversations** | n/a | **No** — new sandbox, empty disk | [Measured] |
+| **Persistent volume / Azure Files mount** | n/a | **Not documented** | [Unknown] |
+| **Where hosted agent source code is stored** | n/a | **Not documented** — use BYO image if code is IP | [Unknown] |
 | **Generic OBO to an arbitrary internal API** | No | No — needs a broker | [Documented] |
 
-## 7.1 State — measured, over the private endpoint
+## 8.1 State — measured, over the private endpoint
 
 The hosted agent wrote and read its own state in a Cosmos account with
 `publicNetworkAccess=Disabled`, `disableLocalAuth=true`, using **its own managed
@@ -870,7 +1106,7 @@ Foundry-managed BYO thread store.
 
 ---
 
-# 8. Operational gotchas found the hard way
+# 9. Operational gotchas found the hard way
 
 Each of these cost real time and none is obvious from the documentation.
 
@@ -898,6 +1134,10 @@ Requirement 5 added five more **[Measured]**:
 | 15 | BYOM does not exist on the legacy `/assistants` API | `<conn>/<model>` fails identically to a typo |
 | 16 | Connection `metadata` is string→string | A nested JSON array → *"unable to deserialize request body"*; must be `json.dumps`'d |
 | 17 | Container Apps has no IMDS | `169.254.169.254` refused instantly; use `IDENTITY_ENDPOINT` + `X-IDENTITY-HEADER` |
+| 18 | `/app` is read-only in the hosted sandbox | Writing next to your code fails with `Errno 30`; use `/home/session` |
+| 19 | Filesystem state silently disappears between conversations | Chained turns share a sandbox, so local testing looks persistent; a new conversation gets an empty disk |
+| 20 | `Shell` session pools reject `code` / `codeInputType` | Use `shellCommand`; older API versions report *"not supported in API version 2023-08-01-preview"* even when you asked for a newer one |
+| 21 | `CsharpLTS` and `GpuBase` pool types exist but are undocumented | `CsharpLTS` is not enabled in `eastus2`; discover availability by asking the RP, not the docs |
 
 Connection creation also returned `InternalServerError` three times in a row
 before succeeding on the fourth with an unchanged payload — **retry before
@@ -916,7 +1156,7 @@ connections.get(name, include_credentials=True)
 
 ---
 
-# 9. Choosing between them
+# 10. Choosing between them
 
 **Prefer prompt agents when** the requirement is a governed, network-isolated
 agent calling internal APIs and running code in a provable sandbox. Everything
@@ -948,7 +1188,7 @@ harness.
 
 ---
 
-# 10. Reproducing
+# 11. Reproducing
 
 Everything runs through one script, because the data plane is unreachable from
 outside the VNet:
@@ -1002,6 +1242,35 @@ Requirement 5 — the LLM gateway:
     TRACKD_AGENT_NAME=trackd-gw AGENTENV_GATEWAY_BASE_URL=<gateway>/v1
 ```
 
+Requirement 6 — telemetry, libraries, filesystem and languages:
+
+```bash
+# deploy the probe agent; the connection string is what telemetry flows to
+./track-d/run-in-vnet.sh deploy_agent.py TRACKD_SRC_DIR=agent-src-plat \
+    TRACKD_AGENT_NAME=trackd-plat \
+    AGENTENV_APPLICATIONINSIGHTS_CONNECTION_STRING='<connection-string>' \
+    AGENTENV_DOCUSIGN_TENANT=acme-corp
+
+# custom spans and metrics, then confirm they arrived
+./track-d/run-in-vnet.sh invoke_agent.py TRACKD_AGENT_NAME=trackd-plat \
+    TRACKD_PROMPT='Call probe_telemetry with marker "dsmark-alpha-01".'
+az monitor app-insights query --app <app-id> --analytics-query \
+    "union dependencies, customMetrics | where name startswith 'docusign'"
+
+# DSPy, and the sandbox runtime inventory
+./track-d/run-in-vnet.sh invoke_agent.py TRACKD_AGENT_NAME=trackd-plat \
+    TRACKD_PROMPT='Call probe_dspy with question "What is the capital of France?"'
+./track-d/run-in-vnet.sh invoke_agent.py TRACKD_AGENT_NAME=trackd-plat \
+    TRACKD_PROMPT='Call probe_runtimes and return its raw JSON.'
+
+# is the filesystem memory? three turns, two conversations
+./track-d/run-in-vnet.sh fs_memory_probe.py TRACKD_AGENT_NAME=trackd-plat
+
+# which pool languages exist - ask the RP, not the docs
+az rest --method PUT --url ".../sessionPools/probe?api-version=2025-02-02-preview" \
+    --body '{"location":"eastus2","properties":{"containerType":"Bogus"}}'
+```
+
 | Agent | Source | Demonstrates |
 |---|---|---|
 | `agent-src/` | LangGraph chat + calculator | Deployability, invocation, cold start |
@@ -1010,6 +1279,7 @@ Requirement 5 — the LLM gateway:
 | `agent-src-ctx/` | Echoes `client_headers`, `metadata`, platform ids, trace | Requirement 4 — context propagation |
 | `agent-src-gw/` | Calls a customer LLM gateway via `base_url` | Requirement 5 — multi-provider gateway |
 | `gateway/` | OpenAI-compatible multi-provider gateway (SSE, audit log) | Requirement 5 — the gateway under test |
+| `agent-src-plat/` | Telemetry, DSPy, filesystem and runtime probes | Requirement 6 — platform capabilities |
 
 > Job environment variables are **sticky** between runs — `run-in-vnet.sh`
 > patches the job definition, so a value set once persists until overwritten.
