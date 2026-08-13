@@ -182,6 +182,13 @@ were measured working against a real gateway deployed in the VNet, including
 tool calling. The trap: Foundry's BYOM path **always requests streaming**, so a
 gateway that only speaks non-streaming JSON fails with an opaque `500`.
 
+**The gateway can be the customer's own, and can stay private.** It does not
+have to be Azure API Management or any Azure product — the one measured here is
+a stdlib-only Python server, and the connection simply takes its URL. It also
+resolved to a **private IP** inside the VNet, unreachable from the public
+internet, and Foundry reached it regardless. The full endpoint contract is in
+[`FINDINGS.md`](FINDINGS.md) §4.5.
+
 Full requirement-by-requirement comparison, capability matrix and the seventeen
 operational gotchas: [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)
 

@@ -534,10 +534,13 @@ whatever it likes".
 | Use a gateway via a **`ModelGateway` connection** (BYOM) | **Yes** — `<connection>/<model>` | n/a | [Measured] |
 | Tool calling survives the gateway hop | **Yes** | Yes | [Measured] |
 | Point the model client straight at the gateway from code | No | **Yes**, no connection or admin needed | [Measured] |
+| Must the gateway be Azure API Management / an Azure product | **No** — any OpenAI-compatible endpoint | No | [Measured] |
+| Can the gateway be private (no public exposure) | **Yes** | Yes | [Measured] |
 
-**Bottom line:** the requirement is satisfiable for both agent types. Prompt
-agents need an **admin-created `ModelGateway` connection** and a gateway that
-meets a real technical contract; hosted agents just set `base_url`.
+**Bottom line:** the requirement is satisfiable for both agent types, and the
+gateway can be **the customer's own**. Prompt agents need an admin-created
+`ModelGateway` connection and a gateway that meets a real technical contract
+(§6.6); hosted agents just set `base_url`.
 
 ## 6.2 Gemini is not in the catalog — this is the pivotal fact
 
@@ -680,7 +683,65 @@ per project without any cooperation from the agent author. [Measured]
 Static `customHeaders` can also be attached to the connection for routing
 policy. [Documented]
 
-## 6.6 Hosted agents: just set `base_url`
+## 6.6 What the gateway has to be, and what it has to do
+
+**It does not have to be an Azure product.** The `ModelGateway` connection
+takes a URL. The gateway measured here is a ~300-line Python `http.server`
+(`track-d/gateway/gateway.py`) deployed as a Container App — no API Management,
+no Azure AI Gateway, no Azure LLM product anywhere in the path. Azure API
+Management is a *documented, supported* option with extra features (token
+limits, semantic caching, managed-identity validation), not a requirement.
+[Measured]
+
+The connection that worked:
+
+| Field | Value |
+|---|---|
+| `category` | `ModelGateway` |
+| `authType` | `ApiKey` (project managed identity also supported [Documented]) |
+| `target` | base URL ending in `/v1` |
+| `metadata.models` | **JSON-encoded string** listing the exposed models |
+| `metadata.deploymentInPath` | whether the model name goes in the URL path |
+
+### Requirements checklist for a customer-built gateway
+
+| # | Requirement | Label |
+|---|---|---|
+| 1 | Serve **OpenAI Chat Completions** at `{target}/chat/completions` | [Measured] |
+| 2 | **Support SSE streaming** — Foundry always sends `"stream": true` | [Measured] |
+| 3 | Emit `chat.completion.chunk` events ending in `data: [DONE]` | [Measured] |
+| 4 | Include `usage` on the final chunk when `stream_options.include_usage` is set | [Measured] |
+| 5 | Tolerate `max_completion_tokens` (Foundry sends `16384`) | [Measured] |
+| 6 | Relay `tools` / `tool_choice` and return `tool_calls` unchanged | [Measured] |
+| 7 | Accept the connection's credential (API key header, or validate the Entra token) | [Measured] |
+| 8 | Be reachable from the Foundry project — **private is fine, see below** | [Measured] |
+| 9 | Return HTTP 200 with an SSE body; non-2xx is retried 3× then surfaces as an opaque 500 | [Measured] |
+
+Requirement 2 is the one that will cost a day. A gateway that answers with a
+perfectly valid **non-streaming** OpenAI JSON body is not "slightly wrong" —
+it fails, silently and unhelpfully, as described in §6.5.
+
+### The gateway can live entirely inside your network
+
+The gateway used here sat on a VNet-injected Container Apps environment, so its
+hostname resolved to a **private IP**. It was unreachable from the engineer's
+laptop — every test had to be driven from inside the VNet — and **Foundry
+reached it anyway**. [Measured]
+
+That matters for DocuSign: the gateway, and therefore the provider credentials
+it holds, never has to be exposed publicly.
+
+### What it does *not* have to do
+
+* It does not have to implement the **Responses** API — Chat Completions is
+  what Foundry's BYOM path calls. [Measured]
+* It does not have to host models itself; it can be a pure router.
+* It does not have to be in the same subscription or region as Foundry.
+* `/v1/models` is not required for a working run (a static `metadata.models`
+  list is what Foundry reads), though it is useful for your own tooling.
+  [Measured]
+
+## 6.7 Hosted agents: just set `base_url`
 
 A hosted agent owns its model client, so no connection, admin step or platform
 feature is involved:
@@ -711,7 +772,7 @@ Three consequences:
   traffic escapes, hosted agents need egress control or code review to enforce
   what BYOM enforces structurally.
 
-## 6.7 What you give up by routing around Foundry
+## 6.8 What you give up by routing around Foundry
 
 Applies to **both** paths, since in both cases Foundry is no longer making the
 model call:
@@ -729,7 +790,7 @@ Also note the data-residency point: a gateway that reaches a non-Azure provider
 moves prompt content outside the Azure compliance boundary. For a customer
 whose driver is data isolation, that deserves an explicit decision. [Documented]
 
-## 6.8 Native alternative worth considering first
+## 6.9 Native alternative worth considering first
 
 Foundry's **Model Router** now spans OpenAI, Anthropic, Meta, DeepSeek and xAI,
 selects per request with tool-awareness, and provides automatic failover.
@@ -739,7 +800,7 @@ If the driver for the gateway is *"one endpoint, several providers, with
 failover"* rather than *"our gateway is a mandated control point"*, Model Router
 delivers most of it natively — for every provider except Gemini.
 
-## 6.9 Recommendation
+## 6.10 Recommendation
 
 | Situation | Recommendation |
 |---|---|

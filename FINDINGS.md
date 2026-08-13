@@ -28,7 +28,8 @@ them as an SLA.
 1. [Cold start, idle behaviour and latency](#1-cold-start-idle-behaviour-and-latency)
 2. [Private networking and internal API access](#2-private-networking-and-internal-api-access)
 3. [Code execution patterns](#3-code-execution-patterns)
-4. [Reproducing](#4-reproducing)
+4. [Using an existing LLM gateway](#4-using-an-existing-llm-gateway)
+5. [Reproducing](#5-reproducing)
 
 ---
 
@@ -570,12 +571,162 @@ used one through a `RemoteTool` project connection.
 
 ---
 
-# 4. Reproducing
+# 4. Using an existing LLM gateway
+
+Measured against a **customer-style gateway**: a stdlib-only Python
+OpenAI-compatible server deployed as a Container App inside the VNet, routing
+`gemini-*` to a non-Azure stub and `gpt-*` to the real Azure OpenAI deployment.
+No API Management and no Azure LLM product were in the path.
+
+## 4.1 Google Gemini is not in the Azure catalog
+
+Enumerating every model offered in `eastus2` returns **11 publishers** —
+Anthropic, Mistral AI, DeepSeek, Meta, Cohere, Microsoft, xAI, Black Forest
+Labs, MoonshotAI, Alibaba, OpenAI. Filtering for publisher `Google` or any
+model name containing `gemini` returns **zero rows**.
+
+This splits "multi-provider" in two: most named providers are already
+first-class Azure models needing no gateway at all, while **Gemini has no Azure
+path** and a gateway is the only way to reach it from a prompt agent.
+
+Deployment friction differs by publisher:
+
+| Publisher | Result |
+|---|---|
+| xAI `grok-4-1-fast-non-reasoning` | Deployed cleanly |
+| Anthropic `claude-haiku-4-5` | `InvalidModelProviderData` — requires `industry`, `organizationName`, `countryCode` |
+
+The Anthropic requirement is a commercial/legal registration step, not an ARM
+call. Budget for it.
+
+## 4.2 A prompt agent runs fine on a non-OpenAI model
+
+| Model | Run status | Tool call emitted | Time |
+|---|---|---|---|
+| `grok-fast` (xAI) | `requires_action` | `get_envelope_status` | 8.58 s |
+| `gpt-4o-mini` (baseline) | `requires_action` | `get_envelope_status` | 5.07 s |
+
+Tool calling — usually the first thing to break on a non-OpenAI model —
+worked. Do not generalise: Foundry publishes an uneven per-model tool matrix,
+and several Cohere and Mistral models are documented as supporting only Code
+Interpreter and File Search, with no Functions, MCP or OpenAPI.
+
+## 4.3 The `model` field is never validated at creation
+
+| `model` value | Create | Run |
+|---|---|---|
+| `https://my-gateway.internal/v1/chat/completions` | 200 OK | `invalid_engine_error` |
+| `gemini-2.5-pro` (bare, no connection) | 200 OK | `invalid_engine_error` |
+
+> `Failed to resolve model info for: <value>`
+
+A typo or an unsupported model surfaces only on the first run. **Validate by
+running a turn in CI**, never by checking that creation returned 200.
+
+## 4.4 The supported path: a `ModelGateway` connection
+
+An admin registers the gateway as a connection; agents then reference models as
+`<connection-name>/<model-name>`.
+
+| Field | Value |
+|---|---|
+| `category` | `ModelGateway` |
+| `authType` | `ApiKey` (project managed identity also supported) |
+| `target` | gateway base URL ending in `/v1` |
+| `metadata.models` | JSON-**encoded string** of the exposed models |
+| `metadata.deploymentInPath` | whether the model name goes in the URL path |
+
+Results from a v2 prompt agent in the locked-down project:
+
+| Test | Model | Outcome | Time |
+|---|---|---|---|
+| Non-Azure provider route | `poc-llm-gateway/gemini-2.5-pro` | Gateway's answer returned | 2.08 s |
+| Real Azure OpenAI via gateway | `poc-llm-gateway/gpt-4o-mini` | Returned `GATEWAY_OK` | 6.18 s |
+| Tool calling via gateway | `poc-llm-gateway/gemini-2.5-pro` | `function_call get_envelope_status` | 0.73 s |
+
+The gateway's own request log is the evidence the traffic transited it.
+
+## 4.5 Gateway endpoint requirements
+
+| # | Requirement |
+|---|---|
+| 1 | Serve **OpenAI Chat Completions** at `{target}/chat/completions` |
+| 2 | **Support SSE streaming** — Foundry always sends `"stream": true` |
+| 3 | Emit `chat.completion.chunk` events terminated by `data: [DONE]` |
+| 4 | Include `usage` on the final chunk when `stream_options.include_usage` is set |
+| 5 | Tolerate `max_completion_tokens` (Foundry sends `16384`) |
+| 6 | Relay `tools` / `tool_choice` and return `tool_calls` unchanged |
+| 7 | Accept the connection credential |
+| 8 | Be reachable from the project — a private IP is sufficient |
+
+Not required: the Responses API, hosting models itself, same
+subscription/region, or a working `/v1/models` endpoint.
+
+**The gateway may be entirely private.** The one used here resolved to a
+private IP on a VNet-injected Container Apps environment — unreachable from the
+engineer's laptop, every test driven from inside the VNet — and Foundry reached
+it regardless. Provider credentials held by the gateway never need public
+exposure.
+
+## 4.6 Four traps, each of which cost a debugging cycle
+
+**BYOM does not exist on the legacy `/assistants` API.** There,
+`<connection>/<model>` fails with `invalid_engine_error` exactly like a bogus
+model name. It works only via `agents.create_version(PromptAgentDefinition(...))`
+plus `responses.create()` with an `agent_reference`.
+
+**Foundry always requests streaming.** Every request carried:
+
+```json
+{"messages": [...], "stream": true, "max_completion_tokens": 16384,
+ "stream_options": {"include_usage": true}, "model": "gpt-4o-mini"}
+```
+
+A gateway answering with valid **non-streaming** JSON gets retried three times
+and then surfaces as an opaque `500 server_error`, with nothing pointing at
+streaming. Verify this before anything else.
+
+**Connection `metadata` is string-to-string.** A real JSON array is rejected
+with *"unable to deserialize request body"*; it must be `json.dumps`'d.
+Connection creation also returned `InternalServerError` on three consecutive
+attempts before succeeding on the fourth with an identical payload — retry
+before assuming the payload is wrong.
+
+**Container Apps has no IMDS.** The gateway's managed-identity call to
+`169.254.169.254` was refused instantly; ACA injects `IDENTITY_ENDPOINT` and
+`IDENTITY_HEADER` instead. It presents as a fast `502` that looks like a
+network policy problem and is not.
+
+## 4.7 What Foundry tells the gateway
+
+Every request carried:
+
+| Header | Example | Use |
+|---|---|---|
+| `x-ms-foundry-agent-id` | `gwtest-b1-gemini:1` | Per-agent quota, routing, chargeback |
+| `x-ms-foundry-model-id` | `poc-llm-gateway/gemini-2.5-pro` | Requested connection/model |
+| `x-ms-foundry-project-id` | project GUID | Per-project attribution |
+| `x-ms-client-request-id` | GUID | Correlation with Foundry's request id |
+
+The gateway can therefore enforce policy and bill per agent and per project
+without any cooperation from the agent author.
+
+---
+
+# 5. Reproducing
 
 ```bash
 ./preflight.sh          # verifies identity, subscription and every demo resource
 ./track-b/run-demo.sh   # ~54 s — private internal API access
 ./track-c/run-demo.sh   # ~96 s — controlled code execution
+```
+
+LLM gateway (§4), all driven from inside the VNet:
+
+```bash
+./track-d/gateway/deploy-gateway.sh                      # OpenAI-compatible gateway in the VNet
+./track-d/run-in-vnet.sh gateway_probe.py                # native non-OpenAI model + negative cases
+./track-d/run-in-vnet.sh gateway_agent_probe.py          # prompt agent via ModelGateway (BYOM)
 ```
 
 Individual probes:
