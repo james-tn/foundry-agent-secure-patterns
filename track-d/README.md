@@ -37,6 +37,7 @@ variable you care about on every run.
 | `gateway_probe.py` | Requirement 5: native non-OpenAI models, and what `model` will not accept |
 | `gateway_agent_probe.py` | Requirement 5: BYOM through a `ModelGateway` connection on the v2 agents API |
 | `fs_memory_probe.py` | Requirement 6: is the sandbox filesystem memory? Three turns across two conversations |
+| `memory_probe.py` | Requirement 6: Foundry Memory — create a store, ingest, recall across conversations, check scope isolation |
 
 ## Agents
 

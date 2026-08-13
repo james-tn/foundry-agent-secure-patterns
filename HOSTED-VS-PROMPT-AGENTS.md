@@ -855,6 +855,9 @@ three new ones. Coverage first, so nothing is re-litigated:
 | Writable filesystem in the agent runtime | n/a | **Yes, 4.1 GB** | [Measured] |
 | Filesystem as **short-term** memory | n/a | **Yes, per conversation** | [Measured] |
 | Filesystem as **long-term** memory | n/a | **No — needs an external store** | [Measured] |
+| Create a **Foundry Memory** store from inside the VNet | Yes, 1.08 s | Yes | [Measured] |
+| **Ingest** into a memory store | **Failed — 401 to the model** | Same | [Measured] |
+| Cross-conversation recall via Foundry Memory | Not reached | Not reached | [Unknown] |
 
 ## 7.2 Telemetry — the sharpest split in the whole comparison
 
@@ -994,7 +997,7 @@ So the filesystem is **conversation-scoped**. [Measured]
   persists, and the warm turn is also less than half the latency.
 * **Long-term memory via filesystem: no.** A new conversation gets a new
   sandbox and an empty disk. Anything that must outlive a conversation belongs
-  in Cosmos DB, Azure Storage or Foundry Memory.
+  in a store — Cosmos DB, Azure Storage or Foundry Memory (§7.6).
 
 Microsoft documents session storage as surviving the 15-minute idle timeout and
 being deleted after **30 days of inactivity**, with up to 20 GiB at 1 vCPU or
@@ -1002,7 +1005,73 @@ larger. Treat it as a durable cache keyed by conversation, not a system of
 record. There is **no documented Azure Files or persistent-volume mount**.
 [Documented / Not documented]
 
-## 7.6 IP protection — where DocuSign data actually sits
+## 7.6 Foundry Memory — the intended long-term answer, and what it did
+
+"No long-term memory" above is a statement about the **filesystem**, not about
+the platform. Foundry Memory is the managed long-term memory service, and it is
+the right architectural answer to the requirement. It was tested rather than
+assumed, and the result is mixed.
+
+**What worked.** A memory store was created successfully **from inside the
+locked-down VNet**, in 1.08 s:
+
+```text
+kind=default  chat_model=gpt-4o-mini  embedding_model=text-embedding-3-small
+options: user_profile_enabled, chat_summary_enabled
+```
+
+This is worth stating plainly because the documentation warns that memory
+stores lack VNet integration: **store creation was not blocked by the private
+network.** [Measured]
+
+**What did not work.** Ingesting a conversation with `begin_update_memories`
+failed, and kept failing:
+
+```text
+ResourceError: Provided Azure resource encountered an error.
+  deployment: <project-guid>/deployments/gpt-4o-mini
+  details: {"type":"Authentication","status_code":401,
+            "description":"Authentication to the Azure OpenAI resource failed."}
+```
+
+The Memory service could not authenticate to the model deployment it had been
+configured with. Because that error is easy to misattribute, three hypotheses
+were tested and **all three were disproved**:
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| The VNet is blocking it | Ran the identical probe against a **fully public** project | **Same 401** — not a network problem |
+| The project identity lacks rights | Granted `Cognitive Services OpenAI User`, then `Cognitive Services User`, then `Cognitive Services OpenAI Contributor` | **Same 401** after propagation |
+| `disableLocalAuth` breaks key auth | Private account has it `true`, public account does not | Both fail **identically** |
+
+So the ingestion path did not work in this subscription, in either network
+posture, with or without extra RBAC. Store creation and retrieval APIs respond
+normally; it is specifically the model-backed ingestion step that fails.
+[Measured]
+
+**How to read this.** Foundry Memory is **preview**, and this is one
+subscription in one region — it is not proof the feature is broken for
+everyone. But it does mean:
+
+* **Cross-conversation recall and per-user scope isolation are `[Unknown]`
+  here** — they were never reached, and this document does not claim measured
+  results it does not have.
+* Long-term memory should not be scheduled as "already solved" on the strength
+  of the documentation. Either validate it early in DocuSign's own tenant, or
+  plan the fallback.
+* The fallback is well-trodden and already proven in this POC: **conversation
+  state in the customer's own Cosmos DB**, measured at 745 ms write / 938 ms
+  read over a private endpoint (§8.1). That also keeps memory inside DocuSign's
+  subscription, which suits the IP-protection requirement in §7.7 better than a
+  managed store does.
+
+Two SDK details that cost time, if anyone reproduces this: the model fields are
+`chat_model` / `embedding_model` on `MemoryStoreDefaultDefinition` (not
+`*_deployment_name` on the options object), and memory items need an explicit
+`"type": "message"` or ingestion fails with *"Failed to parse item with
+unknown/missing type"*. [Measured]
+
+## 7.7 IP protection — where DocuSign data actually sits
 
 Mostly a consolidation of §2 plus Microsoft's published commitments.
 
@@ -1029,7 +1098,7 @@ Two items worth raising on the call rather than burying:
   safer answer, because the image stays in DocuSign's own registry and Foundry
   pulls it. [Not documented / Documented]
 
-## 7.7 Recommendation for these three new requirements
+## 7.8 Recommendation for these three new requirements
 
 Custom telemetry from inside the agent, DSPy, and filesystem working memory are
 **all hosted-agent capabilities and none of them are prompt-agent
@@ -1065,7 +1134,9 @@ That tension is the real decision, and §10 covers it.
 | **Gateway use is governable** | Yes, admin owns the connection | **No** — any endpoint the sandbox reaches | [Measured] |
 | **State to private Cosmos** | BYO Cosmos supported | Yes — keyless AAD, 745 ms write / 938 ms read | [Measured] |
 | **Foundry Tools** | Native `tools=[...]` | Via **Toolbox** MCP endpoint; some tools direct-only | [Documented] |
-| **Foundry Memory** | Supported | Supported, but **memory stores lack VNet integration** | [Documented] |
+| **Foundry Memory** — store creation | **Works, incl. inside the VNet** | Works | [Measured] |
+| **Foundry Memory** — ingestion | **401 to the model deployment**, public and private alike | Same | [Measured] |
+| **Foundry Memory** — recall / scope isolation | Never reached | Never reached | [Unknown] |
 | **BYO Cosmos wiring for hosted threads** | Documented containers | **Mapping undocumented** | [Unknown] |
 | **Observability** | Portal + tracing | Same, plus your own logs; container log stream is essential | [Measured] |
 | **Custom request headers to agent** | No documented mechanism | **`x-client-*` only**; others dropped | [Measured] |
@@ -1138,6 +1209,9 @@ Requirement 5 added five more **[Measured]**:
 | 19 | Filesystem state silently disappears between conversations | Chained turns share a sandbox, so local testing looks persistent; a new conversation gets an empty disk |
 | 20 | `Shell` session pools reject `code` / `codeInputType` | Use `shellCommand`; older API versions report *"not supported in API version 2023-08-01-preview"* even when you asked for a newer one |
 | 21 | `CsharpLTS` and `GpuBase` pool types exist but are undocumented | `CsharpLTS` is not enabled in `eastus2`; discover availability by asking the RP, not the docs |
+| 22 | Foundry Memory ingestion returned `401` to its own model deployment | Reproduced on a **public** project too, so it is not the VNet; survived three RBAC grants |
+| 23 | Memory items need an explicit `"type": "message"` | Plain `role`/`content` fails with *"Failed to parse item with unknown/missing type"* |
+| 24 | Memory model fields are `chat_model` / `embedding_model` | Not `*_deployment_name` on the options object, which raises `TypeError` |
 
 Connection creation also returned `InternalServerError` three times in a row
 before succeeding on the fourth with an unchanged payload — **retry before

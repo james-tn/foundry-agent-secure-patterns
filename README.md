@@ -191,8 +191,16 @@ were measured directly. A hosted agent emitted its own OpenTelemetry span and
 metrics with DocuSign dimensions and both were queried back out of Application
 Insights; **DSPy 3.3.0** installed and ran a real program against the Foundry
 model; and the sandbox has a writable 4.1 GB disk that **persists across
-chained turns but not across conversations** — short-term memory yes, long-term
-memory no. All three are hosted-agent-only. Multi-language execution lives in
+chained turns but not across conversations** — so the *filesystem* is
+short-term memory only. All three are hosted-agent-only.
+
+Long-term memory is meant to be **Foundry Memory**, and that was tested too.
+A memory store was created successfully from inside the VNet, but **ingestion
+failed with a 401** from the Memory service to its own model deployment — and
+the identical failure reproduced on a **fully public** project and survived
+three different RBAC grants, so it is not a networking or permissions problem.
+Memory is preview; treat long-term memory as unproven and keep the measured
+fallback of conversation state in the customer's own Cosmos DB. Multi-language execution lives in
 session pools, where the resource provider accepts `PythonLTS`, `NodeLTS`,
 `Shell`, `CsharpLTS`, `GpuBase` and `CustomContainer` — the last two of which
 are undocumented.
