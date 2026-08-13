@@ -152,11 +152,12 @@ Evidence: [`FINDINGS.md`](FINDINGS.md) §3
 
 ---
 
-## Requirement 4 — would hosted agents change any of this?
+## Requirements 4 and 5 — would hosted agents change any of this?
 
 The three requirements above were answered with **prompt agents**. The same
-three — plus a fourth on request-context propagation — were then re-run with
-**hosted agents** (own code, LangGraph harness) in the same locked-down account.
+three — plus two more, on request-context propagation and on using an existing
+multi-provider LLM gateway — were then re-run with **hosted agents** (own code,
+LangGraph harness) in the same locked-down account.
 
 | | Prompt agent | Hosted agent |
 |---|---|---|
@@ -164,6 +165,7 @@ three — plus a fourth on request-context propagation — were then re-run with
 | Cold start | No measurable penalty | **~15 s per new session**, and `ACTIVE` does not mean ready to serve |
 | Code execution | Sandboxed pool, ~0.57–5.94 s | In-process, **0.15 ms**, but **no isolation** from the agent's own identity and secrets |
 | Request context (identity, tenant, correlation) | No per-request channel to tools; per-user auth only via Toolbox/MCP | **`x-client-*` headers, `metadata` and W3C `traceparent` measured working end to end** |
+| Existing LLM gateway (multi-provider) | Needs an admin-created **`ModelGateway`** connection; model is `<connection>/<model>` | Set `base_url` in your own client — no connection, and no governance either |
 
 **On OBO:** neither agent type can perform a generic on-behalf-of exchange to an
 arbitrary internal API — the caller's `Authorization` header is never delivered
@@ -171,7 +173,16 @@ to agent code. Per-user delegated access is available through **Toolbox/MCP
 connections** (`oauth2`, `user-entra-token`); anything else needs a token-broker
 or a server-side context store.
 
-Full requirement-by-requirement comparison, capability matrix and the twelve
+**On the LLM gateway:** the customer's driver is reaching several providers,
+naming Azure OpenAI and **Google Gemini**. Enumerating `eastus2` returns eleven
+publishers — Anthropic, Meta, Mistral, DeepSeek, xAI, Cohere and others — but
+**no Google**. So every other named provider can be used natively with no
+gateway at all, while Gemini can only be reached *through* one. Both agent types
+were measured working against a real gateway deployed in the VNet, including
+tool calling. The trap: Foundry's BYOM path **always requests streaming**, so a
+gateway that only speaks non-streaming JSON fails with an opaque `500`.
+
+Full requirement-by-requirement comparison, capability matrix and the seventeen
 operational gotchas: [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)
 
 ---
@@ -306,7 +317,7 @@ it.
 |---|---|
 | [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) | **Standalone reusable guideline** — secure networking, internal/on-premises API access, latency, code execution. No environment specifics; safe to share as-is |
 | [`FINDINGS.md`](FINDINGS.md) | All measured evidence: cold start and PTU (§1), private networking (§2), code execution (§3), how to reproduce (§4) |
-| [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) | The same three requirements re-measured with **hosted agents** (LangGraph): comparison per requirement, capability matrix, operational gotchas |
+| [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) | All five requirements re-measured with **hosted agents** (LangGraph): comparison per requirement, request-context propagation, multi-provider LLM gateway, capability matrix, operational gotchas |
 | [`VALIDATION.md`](VALIDATION.md) | Independent re-validation: SDK/API version audit, the two corrected conclusions, PTU measurement |
 | [`DEMO-RUNBOOK.md`](DEMO-RUNBOOK.md) | 60-minute session: agenda, commands, talking points, failure responses |
 | `track-b/`, `track-c/` | Deployment templates, stub API, and demo runners |

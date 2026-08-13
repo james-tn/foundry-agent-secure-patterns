@@ -34,6 +34,8 @@ variable you care about on every run.
 | `session_diag.py` | Stream hosted-container logs — the only way to see inside |
 | `cleanup_sessions.py` | Delete accumulated sessions (dry run unless `TRACKD_CLEANUP_APPLY=1`) |
 | `discover_invoke.py` | Probe that found the invoke route and api-version |
+| `gateway_probe.py` | Requirement 5: native non-OpenAI models, and what `model` will not accept |
+| `gateway_agent_probe.py` | Requirement 5: BYOM through a `ModelGateway` connection on the v2 agents API |
 
 ## Agents
 
@@ -42,6 +44,21 @@ variable you care about on every run.
 | `agent-src/` | Chat + calculator — deployability, invocation, cold start |
 | `agent-src-api/` | Private internal API call and credential resolution |
 | `agent-src-exec/` | In-process code execution, context probe, Cosmos state |
+| `agent-src-ctx/` | Request context, `metadata` and `traceparent` propagation |
+| `agent-src-gw/` | Calling a customer LLM gateway directly via `base_url` |
+
+## Gateway
+
+`gateway/` is a stdlib-only, OpenAI-compatible **multi-provider LLM gateway**
+used as the system under test for Requirement 5. It routes by model name
+(`gemini-*` to a non-Azure stub, `gpt-*` to the real Azure OpenAI deployment),
+speaks **SSE** — which Foundry's BYOM path requires — and keeps an in-memory
+audit log at `/_audit` so "the traffic really transited the gateway" is evidence
+rather than an assumption. Deploy with `gateway/deploy-gateway.sh`.
+
+It carries no image build step on purpose: the private ACR cannot be built
+against from outside the VNet, so the source is injected as a base64 env var and
+decoded at start-up.
 
 ## Prerequisites that are easy to miss
 

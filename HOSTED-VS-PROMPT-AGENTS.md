@@ -36,17 +36,18 @@ data from a stub API.
 3. [Requirement 2 — cold start](#3-requirement-2--cold-start)
 4. [Requirement 3 — code execution](#4-requirement-3--code-execution)
 5. [Requirement 4 — request context propagation and OBO](#5-requirement-4--request-context-propagation-and-obo)
-6. [Capability matrix](#6-capability-matrix)
-7. [Operational gotchas found the hard way](#7-operational-gotchas-found-the-hard-way)
-8. [Choosing between them](#8-choosing-between-them)
-9. [Reproducing](#9-reproducing)
+6. [Requirement 5 — using an existing multi-provider LLM gateway](#6-requirement-5--using-an-existing-multi-provider-llm-gateway)
+7. [Capability matrix](#7-capability-matrix)
+8. [Operational gotchas found the hard way](#8-operational-gotchas-found-the-hard-way)
+9. [Choosing between them](#9-choosing-between-them)
+10. [Reproducing](#10-reproducing)
 
 ---
 
 # 1. Executive summary
 
-All three requirements are satisfiable with hosted agents in a fully private
-account. Two of them are satisfied *differently* enough to change an
+All five requirements are satisfiable in a fully private account. Several are
+satisfied *differently* enough between the two agent types to change an
 architecture review.
 
 | Requirement | Prompt agent | Hosted agent | Verdict |
@@ -55,8 +56,9 @@ architecture review.
 | **2. Cold start** | No measurable idle de-allocation penalty | **~15 s to provision every new session**, plus a slow first serving turn | **Materially worse.** This is the biggest surprise |
 | **3. Code execution** | Delegate to Code Interpreter or an ACA session pool | Run in-process — ~100,000× faster, but **no isolation** | Different trade, not strictly better |
 | **4. Request context propagation** | No per-request channel to tools; per-user auth only via Toolbox/MCP connections | **`x-client-*` headers, `metadata` and `traceparent` all measured working** | Hosted is clearly ahead. **Neither offers generic OBO** |
+| **5. Existing LLM gateway** | Needs an admin-created **`ModelGateway` connection**; model is `<connection>/<model>` | Just set `base_url` in your own client | Both work. **Gemini is not in the Azure catalog**, so a gateway is the only route to it |
 
-**The three findings most worth raising in a design review:**
+**The four findings most worth raising in a design review:**
 
 1. **Hosted agents ship with zero RBAC.** The platform creates two Entra
    identities per agent and grants them **nothing**. Anything the agent needs —
@@ -72,6 +74,10 @@ architecture review.
    in-process can also read every environment variable and mint managed-identity
    tokens. For a customer whose driver is data isolation, in-process execution
    of model-generated code is a data-exfiltration path. §4.2.
+4. **Google Gemini is not in the Azure model catalog.** Eleven publishers are
+   offered in `eastus2` — Anthropic, Meta, Mistral, DeepSeek, xAI and others —
+   but **no Google**. Every other named provider can be used natively without a
+   gateway; Gemini can only be reached *through* one. §6.2.
 
 ---
 
@@ -464,7 +470,7 @@ Your front door writes authoritative context (real end-user id, tenant,
 entitlements) into a store keyed by `(agent_session_id, x-agent-user-id)` before
 invoking the agent; the agent reads it. Because the agent never trusts a
 caller-asserted value, forgery is not possible. This POC already demonstrated the
-storage half — private-endpoint Cosmos, keyless, ~745 ms write (§6.1).
+storage half — private-endpoint Cosmos, keyless, ~745 ms write (§7.1).
 
 **4. `x-client-*` headers for non-authoritative context.**
 Correlation ids, locale, feature flags, request tags. Cheap, measured to work.
@@ -509,7 +515,248 @@ the prompt.
 
 ---
 
-# 6. Capability matrix
+# 6. Requirement 5 — using an existing multi-provider LLM gateway
+
+**The customer's gateway exists to reach several providers — Azure OpenAI and
+Google Gemini were named explicitly — through one governed endpoint.**
+
+Both agent types can use it, but by completely different mechanisms, and only
+one of them is a supported platform feature rather than "your code can do
+whatever it likes".
+
+## 6.1 Result
+
+| Question | Prompt agent | Hosted agent | Label |
+|---|---|---|---|
+| Use a non-OpenAI model that Foundry hosts natively (Grok, Llama, DeepSeek, Mistral) | **Yes**, incl. tool calling | Yes | [Measured] |
+| Use **Google Gemini** natively from the Azure catalog | **No — not in the catalog** | No | [Measured] |
+| Point `model` at a raw gateway URL | **No** — `invalid_engine_error` | n/a | [Measured] |
+| Use a gateway via a **`ModelGateway` connection** (BYOM) | **Yes** — `<connection>/<model>` | n/a | [Measured] |
+| Tool calling survives the gateway hop | **Yes** | Yes | [Measured] |
+| Point the model client straight at the gateway from code | No | **Yes**, no connection or admin needed | [Measured] |
+
+**Bottom line:** the requirement is satisfiable for both agent types. Prompt
+agents need an **admin-created `ModelGateway` connection** and a gateway that
+meets a real technical contract; hosted agents just set `base_url`.
+
+## 6.2 Gemini is not in the catalog — this is the pivotal fact
+
+Enumerating every model offered in `eastus2` returns **11 publishers**:
+
+```
+Anthropic  Mistral AI  DeepSeek  Meta  Cohere
+Microsoft  xAI  Black Forest Labs  MoonshotAI  Alibaba  OpenAI
+```
+
+Searching for publisher `Google` or any model whose name contains `gemini`
+returns **zero rows**. [Measured]
+
+So "multi-provider" splits into two very different problems:
+
+* **Anthropic, Meta, Mistral, DeepSeek, xAI, Cohere** — already first-class
+  Azure models. No gateway needed at all. Deploy them and point an agent at
+  them.
+* **Google Gemini** — no Azure path exists. A gateway is the *only* way to
+  reach it from a Foundry agent.
+
+Two deployment frictions worth knowing before planning:
+
+* **xAI Grok deployed cleanly** into the locked-down account. [Measured]
+* **Anthropic did not**, failing with `InvalidModelProviderData`: Claude
+  deployments require `industry`, `organizationName` and `countryCode`
+  registration data. Budget for a commercial/legal step, not just an ARM call.
+  [Measured]
+
+## 6.3 A prompt agent runs happily on a non-OpenAI model
+
+Deployed `grok-4-1-fast-non-reasoning` and gave a prompt agent a function tool:
+
+| Model | Run status | Tool call emitted | Time |
+|---|---|---|---|
+| `grok-fast` (xAI) | `requires_action` | ✅ `get_envelope_status` | 8.58 s |
+| `gpt-4o-mini` (baseline) | `requires_action` | ✅ `get_envelope_status` | 5.07 s |
+
+Tool calling is the thing that usually breaks on non-OpenAI models, and it
+worked. [Measured]
+
+> Do **not** generalise this. Foundry publishes a per-model tool-support matrix
+> and it is uneven — Cohere Command R and several Mistral models are documented
+> as supporting only Code Interpreter and File Search, with **no** Functions,
+> MCP or OpenAPI. Check the matrix per model, not per provider. [Documented]
+
+## 6.4 What does *not* work: putting a URL in `model`
+
+The obvious approach fails, and it fails late:
+
+| `model` value | Create | Run |
+|---|---|---|
+| `https://my-gateway.internal/v1/chat/completions` | **200 OK** | ❌ `invalid_engine_error` |
+| `gemini-2.5-pro` | **200 OK** | ❌ `invalid_engine_error` |
+
+> `Failed to resolve model info for: <value>`
+
+**Agent creation does not validate `model` at all.** A typo or an unsupported
+model is only discovered on the first run. Validate by running one turn in CI,
+never by checking that creation returned 200. [Measured]
+
+## 6.5 What does work: a `ModelGateway` connection (BYOM)
+
+Foundry's supported answer is **bring your own model**: an admin registers the
+gateway as a connection, declares which models it exposes, and agents then
+reference them as `<connection-name>/<model-name>`.
+
+To prove it end to end rather than reading about it, this POC deployed a real
+OpenAI-compatible gateway (`track-d/gateway/gateway.py`) as a Container App
+**inside the VNet**, routing by model name:
+
+* `gemini-*` → a stub standing in for Google Gemini, representing a provider
+  Azure has no catalog entry for
+* `gpt-*` → the **real Azure OpenAI deployment**, keyless via managed identity
+
+Results, from a v2 prompt agent in the locked-down project:
+
+| Test | Model | Outcome | Time |
+|---|---|---|---|
+| Non-Azure provider | `poc-llm-gateway/gemini-2.5-pro` | ✅ gateway's answer returned to the agent | 2.08 s |
+| Real Azure OpenAI via gateway | `poc-llm-gateway/gpt-4o-mini` | ✅ returned `GATEWAY_OK` | 6.18 s |
+| Tool calling via gateway | `poc-llm-gateway/gemini-2.5-pro` | ✅ `function_call get_envelope_status` | 0.73 s |
+
+The gateway's own request log is the proof the traffic really transited it —
+not model prose. [Measured]
+
+### Four traps that each cost a debugging cycle
+
+**1. BYOM only exists on the v2 prompt-agent API.**
+On the legacy `/assistants` surface, `<connection>/<model>` fails with
+`invalid_engine_error` exactly like a bogus model name. It works only via
+`agents.create_version(PromptAgentDefinition(...))` plus `responses.create()`
+with an `agent_reference`. If you are still on `/assistants`, BYOM is not
+available to you. [Measured]
+
+**2. Foundry always requests streaming. This is the big one.**
+Every request Foundry sent the gateway contained `"stream": true`:
+
+```json
+{"messages": [...], "stream": true, "max_completion_tokens": 16384,
+ "stream_options": {"include_usage": true}, "model": "gpt-4o-mini", ...}
+```
+
+A gateway that answers with a perfectly valid **non-streaming** OpenAI JSON
+body gets the request retried three times and then surfaces to the caller as an
+opaque `500 server_error` — with nothing in the message pointing at streaming.
+The gateway must emit **SSE `chat.completion.chunk` events terminated by
+`data: [DONE]`**, including `usage` on the final chunk when
+`stream_options.include_usage` is set. **Verify this before anything else.**
+[Measured]
+
+**3. Connection metadata must be a JSON *string*.**
+`metadata.models` is a map of string→string. Passing a real JSON array is
+rejected with *"unable to deserialize request body"*; it has to be
+`json.dumps(...)` into a string.
+
+Connection creation also returned `InternalServerError` on three consecutive
+attempts before succeeding on the fourth, with an identical payload. **Retry
+before believing the payload is wrong.** [Measured]
+
+**4. Container Apps has no IMDS.**
+The gateway's managed-identity call to `169.254.169.254` was refused instantly.
+ACA injects `IDENTITY_ENDPOINT` / `IDENTITY_HEADER` instead. It presents as a
+fast `502` that looks like a network policy problem and is not. [Measured]
+
+### What Foundry tells your gateway
+
+Every BYOM request carried:
+
+| Header | Example | Use |
+|---|---|---|
+| `x-ms-foundry-agent-id` | `gwtest-b1-gemini:1` | Per-agent quota, routing, chargeback |
+| `x-ms-foundry-model-id` | `poc-llm-gateway/gemini-2.5-pro` | Requested connection/model |
+| `x-ms-foundry-project-id` | project GUID | Per-project attribution |
+| `x-ms-client-request-id` | GUID | Correlation with Foundry's request id |
+
+This is genuinely useful: the gateway can enforce policy and bill per agent and
+per project without any cooperation from the agent author. [Measured]
+
+Static `customHeaders` can also be attached to the connection for routing
+policy. [Documented]
+
+## 6.6 Hosted agents: just set `base_url`
+
+A hosted agent owns its model client, so no connection, admin step or platform
+feature is involved:
+
+```python
+ChatOpenAI(
+    model="gemini-2.5-pro",
+    base_url=GATEWAY_BASE_URL,     # the customer's gateway
+    api_key=GATEWAY_API_KEY,
+    use_responses_api=False,       # the gateway speaks Chat Completions
+)
+```
+
+Measured from a hosted agent in the locked-down project: the call reached the
+gateway in **39.2 ms** and returned the gateway's content, with the gateway's
+own log recording it as a **non-streaming** request — the distinguishing
+fingerprint against Foundry's always-streaming BYOM calls. [Measured]
+
+Three consequences:
+
+* The gateway does **not** have to support SSE for this path, because your code
+  chooses whether to stream.
+* Nothing constrains you to Chat Completions. Native Gemini, Anthropic Messages
+  or a bespoke protocol are all fine — it is your client.
+* Equally, nothing *governs* it. Any developer can point at any endpoint the
+  sandbox can reach, and §2.4 measured that the sandbox has **unrestricted
+  outbound internet**. If the point of the gateway is to guarantee no model
+  traffic escapes, hosted agents need egress control or code review to enforce
+  what BYOM enforces structurally.
+
+## 6.7 What you give up by routing around Foundry
+
+Applies to **both** paths, since in both cases Foundry is no longer making the
+model call:
+
+| Capability | Effect |
+|---|---|
+| Deployment content filters | Only apply if the gateway's backend is a filtered Azure deployment |
+| Portal token/cost accounting | Not attributed to a Foundry deployment; use gateway telemetry |
+| Model Router | Bypassed unless the gateway itself routes to a router deployment |
+| PTU / provisioned throughput | Bypassed unless the gateway's backend uses it |
+| Model spans in tracing | Agent-level telemetry is retained; per-model spans depend on your instrumentation |
+| Responsible AI | **Your responsibility.** Microsoft designates BYOM models as non-Microsoft products, used at your own risk [Documented] |
+
+Also note the data-residency point: a gateway that reaches a non-Azure provider
+moves prompt content outside the Azure compliance boundary. For a customer
+whose driver is data isolation, that deserves an explicit decision. [Documented]
+
+## 6.8 Native alternative worth considering first
+
+Foundry's **Model Router** now spans OpenAI, Anthropic, Meta, DeepSeek and xAI,
+selects per request with tool-awareness, and provides automatic failover.
+**Gemini, Mistral and Cohere are not in the pool.** [Documented]
+
+If the driver for the gateway is *"one endpoint, several providers, with
+failover"* rather than *"our gateway is a mandated control point"*, Model Router
+delivers most of it natively — for every provider except Gemini.
+
+## 6.9 Recommendation
+
+| Situation | Recommendation |
+|---|---|
+| Provider is Anthropic / Meta / Mistral / DeepSeek / xAI | Deploy natively. Skip the gateway. Check the tool matrix first |
+| Requirement is Gemini | Gateway is the **only** option. Prompt agent → `ModelGateway` connection → gateway → Gemini's OpenAI-compatible API |
+| Gateway is a mandated governance control point | **Prompt agents + BYOM.** Admin-owned and structurally enforced |
+| Want one endpoint with failover, Gemini not required | Evaluate **Model Router** first |
+| Need native provider protocols or full client control | **Hosted agent**, with egress control to stop it becoming a bypass |
+
+**If you build the gateway, get these right on day one:** SSE streaming,
+OpenAI-compatible `tools` / `tool_choice` / `response_format`, and correct
+`deploymentInPath`. The first is the one that silently produces an
+uninformative `500`.
+
+---
+
+# 7. Capability matrix
 
 | Capability | Prompt agent | Hosted agent | Label |
 |---|---|---|---|
@@ -526,6 +773,11 @@ the prompt.
 | **Keep-warm control** | Not needed | **None exposed**; do it in the app | [Measured] |
 | **Code execution** | Code Interpreter / ACA pool | In-process, or call an ACA pool | [Measured] |
 | **Conversation state** | Foundry-managed thread store | **You own it** | [Measured] |
+| **Non-OpenAI Azure models** | Yes, incl. tool calling (Grok measured) | Yes | [Measured] |
+| **Google Gemini natively** | **Not in the catalog** | Not in the catalog | [Measured] |
+| **Customer LLM gateway** | Via `ModelGateway` connection, `<conn>/<model>` | Set `base_url` directly | [Measured] |
+| **Gateway must support SSE** | **Yes** — Foundry always streams | No — your client chooses | [Measured] |
+| **Gateway use is governable** | Yes, admin owns the connection | **No** — any endpoint the sandbox reaches | [Measured] |
 | **State to private Cosmos** | BYO Cosmos supported | Yes — keyless AAD, 745 ms write / 938 ms read | [Measured] |
 | **Foundry Tools** | Native `tools=[...]` | Via **Toolbox** MCP endpoint; some tools direct-only | [Documented] |
 | **Foundry Memory** | Supported | Supported, but **memory stores lack VNet integration** | [Documented] |
@@ -538,7 +790,7 @@ the prompt.
 | **Per-user delegated auth (OBO)** | Toolbox/MCP `oauth2`, `user-entra-token` | Same, via Toolbox | [Documented] |
 | **Generic OBO to an arbitrary internal API** | No | No — needs a broker | [Documented] |
 
-## 6.1 State — measured, over the private endpoint
+## 7.1 State — measured, over the private endpoint
 
 The hosted agent wrote and read its own state in a Cosmos account with
 `publicNetworkAccess=Disabled`, `disableLocalAuth=true`, using **its own managed
@@ -557,7 +809,7 @@ Foundry-managed BYO thread store.
 
 ---
 
-# 7. Operational gotchas found the hard way
+# 8. Operational gotchas found the hard way
 
 Each of these cost real time and none is obvious from the documentation.
 
@@ -576,6 +828,20 @@ Each of these cost real time and none is obvious from the documentation.
 | 11 | SDK logs a full traceback per empty 204 | Floods `--tail`, pushes real errors out | Silence the `azure` logger |
 | 12 | `az` active subscription is global mutable state | `ResourceGroupNotFound` for resources that exist | Pin `--subscription` on every call |
 
+Requirement 5 added five more **[Measured]**:
+
+| # | Gotcha | Symptom |
+|---|---|---|
+| 13 | Foundry's BYOM path **always** sends `"stream": true` | A valid non-streaming gateway reply → 3 silent retries → opaque `500 server_error` |
+| 14 | Agent creation never validates `model` | Bogus model or URL returns `200`; fails only at run with `invalid_engine_error` |
+| 15 | BYOM does not exist on the legacy `/assistants` API | `<conn>/<model>` fails identically to a typo |
+| 16 | Connection `metadata` is string→string | A nested JSON array → *"unable to deserialize request body"*; must be `json.dumps`'d |
+| 17 | Container Apps has no IMDS | `169.254.169.254` refused instantly; use `IDENTITY_ENDPOINT` + `X-IDENTITY-HEADER` |
+
+Connection creation also returned `InternalServerError` three times in a row
+before succeeding on the fourth with an unchanged payload — **retry before
+debugging the payload**.
+
 SDK shapes that differ from the obvious guess **[Measured]**:
 
 ```text
@@ -589,7 +855,7 @@ connections.get(name, include_credentials=True)
 
 ---
 
-# 8. Choosing between them
+# 9. Choosing between them
 
 **Prefer prompt agents when** the requirement is a governed, network-isolated
 agent calling internal APIs and running code in a provable sandbox. Everything
@@ -621,7 +887,7 @@ harness.
 
 ---
 
-# 9. Reproducing
+# 10. Reproducing
 
 Everything runs through one script, because the data plane is unreachable from
 outside the VNet:
@@ -657,12 +923,32 @@ export AZ_SUBSCRIPTION=<subscription-id>
     'TRACKD_METADATA={"tenant":"contoso"}'
 ```
 
+Requirement 5 — the LLM gateway:
+
+```bash
+# stand up an OpenAI-compatible multi-provider gateway inside the VNet
+./track-d/gateway/deploy-gateway.sh
+
+# prompt agent on a native non-OpenAI model, and the negative cases
+./track-d/run-in-vnet.sh gateway_probe.py GW_PROJECT_ENDPOINT=<project>
+
+# prompt agent through the ModelGateway connection (BYOM, v2 API)
+./track-d/run-in-vnet.sh gateway_agent_probe.py \
+    GW_CONNECTION=poc-llm-gateway GW_BASE=<gateway>/v1
+
+# hosted agent calling the same gateway from its own client
+./track-d/run-in-vnet.sh deploy_agent.py TRACKD_SRC_DIR=agent-src-gw \
+    TRACKD_AGENT_NAME=trackd-gw AGENTENV_GATEWAY_BASE_URL=<gateway>/v1
+```
+
 | Agent | Source | Demonstrates |
 |---|---|---|
 | `agent-src/` | LangGraph chat + calculator | Deployability, invocation, cold start |
 | `agent-src-api/` | Envelope status tool | Requirement 1 — private API + credential resolution |
 | `agent-src-exec/` | `run_python`, context probe, Cosmos state | Requirements 3 and state |
 | `agent-src-ctx/` | Echoes `client_headers`, `metadata`, platform ids, trace | Requirement 4 — context propagation |
+| `agent-src-gw/` | Calls a customer LLM gateway via `base_url` | Requirement 5 — multi-provider gateway |
+| `gateway/` | OpenAI-compatible multi-provider gateway (SSE, audit log) | Requirement 5 — the gateway under test |
 
 > Job environment variables are **sticky** between runs — `run-in-vnet.sh`
 > patches the job definition, so a value set once persists until overwritten.
