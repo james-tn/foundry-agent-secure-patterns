@@ -58,7 +58,7 @@ change an architecture review — and two of them point in opposite directions.
 | **3. Code execution** | Delegate to Code Interpreter or an ACA session pool | Run in-process — ~100,000× faster, but **no isolation** | Different trade, not strictly better |
 | **4. Request context propagation** | No per-request channel to tools; per-user auth only via Toolbox/MCP connections | **`x-client-*` headers, `metadata` and `traceparent` all measured working** | Hosted is clearly ahead. **Neither offers generic OBO** |
 | **5. Existing LLM gateway** | Needs an admin-created **`ModelGateway` connection**; model is `<connection>/<model>` | Just set `base_url` in your own client | Both work. **Gemini is not in the Azure catalog**, so a gateway is the only route to it |
-| **6a. Custom telemetry & metrics** | Microsoft's traces only; instrument the *caller* | **Custom spans and metrics measured landing in App Insights** | Hosted only |
+| **6a. Custom telemetry & metrics** | Microsoft's traces only; instrument the *caller* | **Custom spans and metrics measured landing in App Insights *and* in a non-Azure OTLP backend** | Hosted only |
 | **6b. Library integration (DSPy)** | Not possible in the loop | **DSPy 3.3.0 installed and ran** | Hosted only |
 | **6c. Filesystem memory** | n/a | Writable 4.1 GB disk, **persists per conversation, not across them** | Short-term yes, long-term no |
 | **6d. Multi-language execution** | Session pools: Node, Shell, C#, GPU, custom | Same pools; runtime itself is Python | Both, via pools |
@@ -849,7 +849,7 @@ three new ones. Coverage first, so nothing is re-litigated:
 |---|---|---|---|
 | Emit **custom OTel spans** with customer dimensions | From the *calling app* only | **Yes, from inside the agent** | [Measured] |
 | Emit **custom OTel metrics** | No — Microsoft owns the loop | **Yes** | [Measured] |
-| Export telemetry to a **non-Azure** backend (Datadog, OTLP) | No | **Yes** | [Documented] |
+| Export telemetry to a **non-Azure** backend (Datadog, OTLP) | No | **Yes — measured against a third-party OTLP sink** | [Measured] |
 | Install an arbitrary PyPI library (DSPy) | No | **Yes — DSPy 3.3.0 ran** | [Measured] |
 | Run **non-Python** code | Via session pools | Via session pools | [Measured] |
 | Writable filesystem in the agent runtime | n/a | **Yes, 4.1 GB** | [Measured] |
@@ -881,10 +881,45 @@ Two useful details about the sandbox:
   and standard OTel APIs are picked up without the agent configuring an
   exporter. `OTEL_SERVICE_NAME` and `FOUNDRY_AGENT365_TRACING_ENABLED` are set
   too. [Measured]
-* Hosted agents can additionally export to any OTLP endpoint via
-  `OTEL_EXPORTER_OTLP_*`, including a self-hosted collector or Datadog —
-  relevant if DocuSign's observability stack is not Azure Monitor.
-  [Documented]
+* Hosted agents can additionally export to a **non-Microsoft** backend over
+  OTLP/HTTP. This was measured, not assumed, because DocuSign does not use
+  Azure Monitor — see §7.2.1. [Measured]
+
+### 7.2.1 Exporting to a non-Azure backend — measured
+
+A stdlib-only OTLP/HTTP receiver (`track-d/otlp-sink/`) was deployed to the
+same VNet to stand in for Datadog / Splunk / a self-hosted collector. The agent
+was redeployed with `OTEL_EXPORTER_OTLP_ENDPOINT` pointing at it and *no* Azure
+Monitor configuration, then invoked.
+
+| What | Result |
+|---|---|
+| Payloads received by the third-party sink | 49 over five invocations |
+| Signals received | `traces`, `metrics`, **and** `logs` |
+| Custom span | `docusign.envelope.validate` arrived, with `docusign.marker`, `docusign.envelope_id`, `docusign.correlation_id`, `docusign.tenant` |
+| Custom metrics | `docusign.envelopes.processed`, `docusign.envelope.latency` arrived, with their dimensions |
+| Resource attributes | `service.name=docusign-hosted-agent`, `docusign.tenant=acme-corp` |
+| Content type | `application/x-protobuf` (standard OTLP/HTTP) |
+
+Two findings worth raising on the call:
+
+* **The platform's own telemetry followed.** Payloads also arrived tagged
+  `service.name=trackd-plat` carrying `azure.monitor.opentelemetry.performance_counters`,
+  and log records containing the model-call URL
+  (`POST …/openai/v1/responses`). Setting the standard OTLP env var
+  redirects the *platform's* instrumentation as well as the customer's, so
+  DocuSign gets the full agent trace — including model calls it did not
+  instrument — in its own backend. It also means endpoint URLs leave Azure, so
+  the sink must be treated as in-scope for the IP-protection review (§7.7).
+  [Measured]
+* **Egress is unrestricted**, consistent with §2.4: the sandbox reached the
+  sink directly. A public Datadog endpoint would work the same way; nothing
+  needs to be allowlisted. [Measured]
+
+Nothing about this is Azure-specific — the sink is ~90 lines of Python with no
+dependencies, and the exporter is the stock `opentelemetry-exporter-otlp-proto-http`
+package added to the agent's `requirements.txt`.
+
 
 **For prompt agents the honest answer is different.** Foundry emits rich
 server-side traces, but Microsoft owns the loop, so DocuSign's own code is not
@@ -1146,7 +1181,7 @@ That tension is the real decision, and §10 covers it.
 | **Per-user delegated auth (OBO)** | Toolbox/MCP `oauth2`, `user-entra-token` | Same, via Toolbox | [Documented] |
 | **Custom OTel spans from inside the agent** | **No** — instrument the caller | **Yes**, with customer dimensions | [Measured] |
 | **Custom OTel metrics from inside the agent** | **No** | **Yes** — counter and histogram measured | [Measured] |
-| **Export telemetry to non-Azure backend** | No | **Yes** via `OTEL_EXPORTER_OTLP_*` | [Documented] |
+| **Export telemetry to non-Azure backend** | No | **Yes** via `OTEL_EXPORTER_OTLP_*`; traces, metrics and logs all arrived | [Measured] |
 | **Arbitrary PyPI libraries (DSPy)** | **No** | **Yes** — DSPy 3.3.0 ran a real program | [Measured] |
 | **Agent runtime language** | n/a | **Python-only in practice**; Python/C# documented, or BYO image | [Measured] |
 | **Session pool languages** | `PythonLTS`, `NodeLTS`, `Shell`, `CsharpLTS`, `GpuBase`, `CustomContainer` | Same | [Measured] |
@@ -1212,6 +1247,7 @@ Requirement 5 added five more **[Measured]**:
 | 22 | Foundry Memory ingestion returned `401` to its own model deployment | Reproduced on a **public** project too, so it is not the VNet; survived three RBAC grants |
 | 23 | Memory items need an explicit `"type": "message"` | Plain `role`/`content` fails with *"Failed to parse item with unknown/missing type"* |
 | 24 | Memory model fields are `chat_model` / `embedding_model` | Not `*_deployment_name` on the options object, which raises `TypeError` |
+| 25 | A new agent version does **not** evict warm sandboxes | The first invoke after publishing `:3` ran `:2`'s code; re-invoke until the reported instance id changes, or you will measure the old build |
 
 Connection creation also returned `InternalServerError` three times in a row
 before succeeding on the fourth with an unchanged payload — **retry before
@@ -1340,6 +1376,17 @@ az monitor app-insights query --app <app-id> --analytics-query \
 # is the filesystem memory? three turns, two conversations
 ./track-d/run-in-vnet.sh fs_memory_probe.py TRACKD_AGENT_NAME=trackd-plat
 
+# telemetry to a NON-Azure backend: stand up a third-party OTLP sink,
+# point the agent at it, then read what the sink actually received
+./track-d/otlp-sink/deploy-sink.sh          # needs SINK_ACA_ENV=<aca-env-id>
+./track-d/run-in-vnet.sh deploy_agent.py TRACKD_SRC_DIR=agent-src-plat \
+    TRACKD_AGENT_NAME=trackd-plat \
+    AGENTENV_OTEL_EXPORTER_OTLP_ENDPOINT=https://<sink-fqdn>
+./track-d/run-in-vnet.sh invoke_agent.py TRACKD_AGENT_NAME=trackd-plat \
+    TRACKD_PROMPT='Call probe_telemetry with marker otlp-run-1.'
+./track-d/run-in-vnet.sh sink_check.py SINK_BASE_URL=https://<sink-fqdn> \
+    'SINK_PATH=/_received?signal=traces&n=4'
+
 # which pool languages exist - ask the RP, not the docs
 az rest --method PUT --url ".../sessionPools/probe?api-version=2025-02-02-preview" \
     --body '{"location":"eastus2","properties":{"containerType":"Bogus"}}'
@@ -1354,6 +1401,7 @@ az rest --method PUT --url ".../sessionPools/probe?api-version=2025-02-02-previe
 | `agent-src-gw/` | Calls a customer LLM gateway via `base_url` | Requirement 5 — multi-provider gateway |
 | `gateway/` | OpenAI-compatible multi-provider gateway (SSE, audit log) | Requirement 5 — the gateway under test |
 | `agent-src-plat/` | Telemetry, DSPy, filesystem and runtime probes | Requirement 6 — platform capabilities |
+| `otlp-sink/` | Dependency-free OTLP/HTTP receiver standing in for Datadog | Requirement 6 — telemetry to a non-Azure backend |
 
 > Job environment variables are **sticky** between runs — `run-in-vnet.sh`
 > patches the job definition, so a value set once persists until overwritten.

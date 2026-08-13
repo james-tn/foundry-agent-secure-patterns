@@ -38,6 +38,7 @@ variable you care about on every run.
 | `gateway_agent_probe.py` | Requirement 5: BYOM through a `ModelGateway` connection on the v2 agents API |
 | `fs_memory_probe.py` | Requirement 6: is the sandbox filesystem memory? Three turns across two conversations |
 | `memory_probe.py` | Requirement 6: Foundry Memory — create a store, ingest, recall across conversations, check scope isolation |
+| `sink_check.py` | Requirement 6: read the third-party OTLP sink's received-telemetry log (its FQDN only resolves in-VNet) |
 
 ## Agents
 
@@ -49,6 +50,7 @@ variable you care about on every run.
 | `agent-src-ctx/` | Request context, `metadata` and `traceparent` propagation |
 | `agent-src-gw/` | Calling a customer LLM gateway directly via `base_url` |
 | `agent-src-plat/` | Requirement 6: custom telemetry and metrics, DSPy, filesystem, runtime inventory |
+| `otlp-sink/` | Requirement 6: dependency-free OTLP/HTTP receiver standing in for Datadog / Splunk / a self-hosted collector |
 
 ## Gateway
 

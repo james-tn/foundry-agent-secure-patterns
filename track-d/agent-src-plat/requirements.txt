@@ -9,5 +9,8 @@ azure-monitor-opentelemetry
 opentelemetry-api
 opentelemetry-sdk
 
+# Requirement 6: export to a non-Microsoft observability backend.
+opentelemetry-exporter-otlp-proto-http
+
 # Requirement 6: an arbitrary third-party prompt-optimisation library.
 dspy-ai

@@ -168,6 +168,7 @@ integration and filesystem memory — were then re-run with **hosted agents**
 | Request context (identity, tenant, correlation) | No per-request channel to tools; per-user auth only via Toolbox/MCP | **`x-client-*` headers, `metadata` and W3C `traceparent` measured working end to end** |
 | Existing LLM gateway (multi-provider) | Needs an admin-created **`ModelGateway`** connection; model is `<connection>/<model>` | Set `base_url` in your own client — no connection, and no governance either |
 | Custom telemetry and metrics | Microsoft's traces only; instrument the **caller** | **Custom spans and metrics measured landing in App Insights** with DocuSign dimensions |
+| Telemetry to a non-Azure backend (Datadog, Splunk, OTLP collector) | No | **Yes — measured**: traces, metrics and logs delivered to a third-party OTLP sink |
 | Prompt-optimisation libraries (DSPy) | Not possible inside the loop | **DSPy 3.3.0 installed and ran** against the Foundry model |
 | Filesystem memory | n/a | Writable 4.1 GB disk; **persists per conversation, not across them** |
 

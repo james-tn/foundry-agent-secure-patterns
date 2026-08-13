@@ -52,7 +52,56 @@ _credential = DefaultAzureCredential()
 _TELEMETRY: dict = {"configured": False}
 
 
+def _configure_otlp(endpoint: str) -> None:
+    """Export to a non-Microsoft backend over OTLP/HTTP.
+
+    Stands in for Datadog / Splunk / a self-hosted collector: the SDK and the
+    wire format are identical, only the URL differs.
+    """
+    from opentelemetry import metrics, trace
+    from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    resource = Resource.create({
+        "service.name": os.environ.get("OTEL_SERVICE_NAME", "docusign-hosted-agent"),
+        "docusign.tenant": os.environ.get("DOCUSIGN_TENANT", "acme-corp"),
+        "docusign.component": "envelope-agent",
+    })
+    base = endpoint.rstrip("/")
+
+    tp = TracerProvider(resource=resource)
+    tp.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{base}/v1/traces", timeout=15))
+    )
+    trace.set_tracer_provider(tp)
+
+    reader = PeriodicExportingMetricReader(
+        OTLPMetricExporter(endpoint=f"{base}/v1/metrics", timeout=15),
+        export_interval_millis=15000,
+    )
+    metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
+
+    _TELEMETRY["configured"] = True
+    _TELEMETRY["exporter"] = "otlp-http"
+    _TELEMETRY["otlp_endpoint_host"] = base.split("//")[-1].split("/")[0]
+
+
 def _configure_telemetry() -> None:
+    otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    _TELEMETRY["otlp_endpoint_present"] = bool(otlp)
+    if otlp:
+        _TELEMETRY["source"] = "otlp-env"
+        try:
+            _configure_otlp(otlp)
+        except Exception as exc:  # noqa: BLE001
+            _TELEMETRY["error"] = f"otlp: {type(exc).__name__}: {str(exc)[:300]}"
+        return
+
     conn = os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING", "")
     _TELEMETRY["connection_string_present"] = bool(conn)
     _TELEMETRY["source"] = "env" if conn else "none"
