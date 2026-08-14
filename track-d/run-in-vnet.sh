@@ -31,6 +31,8 @@ echo "==> packaging payload (entry: ${ENTRY})"
 mkdir -p "${WORK}/payload"
 cp "${SCRIPT_DIR}"/*.py "${WORK}/payload/"
 cp "${SCRIPT_DIR}/../probes/_config.py" "${WORK}/payload/"
+# Track B probes run in the same VNet and against the same private endpoints.
+cp "${SCRIPT_DIR}"/../track-b/*.py "${WORK}/payload/" 2>/dev/null || true
 for d in "${SCRIPT_DIR}"/agent-src*; do cp -r "$d" "${WORK}/payload/$(basename "$d")"; done
 tar czf "${WORK}/p.tgz" -C "${WORK}/payload" .
 B64="$(base64 -w0 "${WORK}/p.tgz")"

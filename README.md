@@ -165,7 +165,7 @@ integration and filesystem memory — were then re-run with **hosted agents**
 | VNet + internal API | Works; credential injected by the platform | Works, but the agent identity starts with **zero RBAC** and deployment is a **data-plane** operation, so CI/CD must run in-VNet |
 | Cold start | No measurable penalty | **~15 s per new session**, and `ACTIVE` does not mean ready to serve |
 | Code execution | Sandboxed pool, ~0.57–5.94 s | In-process, **0.15 ms**, but **no isolation** from the agent's own identity and secrets |
-| Request context (identity, tenant, correlation) | No per-request channel to tools; per-user auth only via Toolbox/MCP | **`x-client-*` headers, `metadata` and W3C `traceparent` measured working end to end** |
+| Request context (identity, tenant, correlation) | **W3C `traceparent` and `baggage` measured reaching the internal API**; `x-client-*` and `metadata` do not survive; per-user auth via Toolbox/MCP | **`x-client-*` headers, `metadata` and W3C `traceparent` measured working end to end** |
 | Existing LLM gateway (multi-provider) | Needs an admin-created **`ModelGateway`** connection; model is `<connection>/<model>` | Set `base_url` in your own client — no connection, and no governance either |
 | Custom telemetry and metrics | Microsoft's traces only; instrument the **caller** | **Custom spans and metrics measured landing in App Insights** with DocuSign dimensions |
 | Telemetry to a non-Azure backend (Datadog, Splunk, OTLP collector) | No | **Yes — measured**: traces, metrics and logs delivered to a third-party OTLP sink |
@@ -213,7 +213,7 @@ resolved to a **private IP** inside the VNet, unreachable from the public
 internet, and Foundry reached it regardless. The full endpoint contract is in
 [`FINDINGS.md`](FINDINGS.md) §4.5.
 
-Full requirement-by-requirement comparison, capability matrix and the twenty-one
+Full requirement-by-requirement comparison, capability matrix and the twenty-six
 operational gotchas: [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)
 
 ---

@@ -418,6 +418,37 @@ backing resources.
 > guidance for on-premises or cross-network APIs now live in
 > [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) Parts 1 and 2.
 
+## 2.6 What request context reaches the internal API
+
+Reaching the API privately is one problem; telling it *who and why* is another.
+An echo API (`track-b/context-echo/`) recording every inbound header was
+registered as an OpenAPI tool and called by a prompt agent, with caller-supplied
+headers, `metadata`, a `traceparent` and a `baggage` header on the request.
+
+| Sent by the caller | Arrived at the internal API | Label |
+|---|---|---|
+| `x-client-*` headers | **No** | [Measured] |
+| Responses `metadata` | **No** | [Measured] |
+| `traceparent` | **Yes**, same trace id, new span id | [Measured] |
+| `baggage` | **Yes**, caller entries merged with the platform's | [Measured] |
+
+```text
+traceparent: 00-11112222333344445555666677778888-909d89b9288336d0-01
+baggage:     docusign_tenant = contoso-eu, docusign_corr = corr-prompt-77,
+             leaf_customer_span_id = 8e6fbb6cd61dad1f
+```
+
+So **end-to-end correlation works today** with no custom plumbing, and W3C
+`baggage` gives prompt agents a genuine per-request channel for custom context.
+Three caveats: it is caller-asserted so it is **not** an authorization
+mechanism; oversized entries are **silently dropped** (~2 KB survived, ~8 KB did
+not); and it is a side effect of the platform's OpenTelemetry instrumentation
+rather than a documented contract.
+
+Full analysis, including the hosted-agent comparison and the recommended
+patterns, is in
+[`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) §5.
+
 ---
 
 # 3. Code execution patterns
@@ -750,6 +781,11 @@ without any cooperation from the agent author.
 ./preflight.sh          # verifies identity, subscription and every demo resource
 ./track-b/run-demo.sh   # ~54 s — private internal API access
 ./track-c/run-demo.sh   # ~96 s — controlled code execution
+
+# what context reaches the internal API (§2.6) — echo API + prompt agent
+./track-b/context-echo/deploy-echo.sh          # needs ECHO_ACA_ENV=<aca-env-id>
+./track-d/run-in-vnet.sh ctx_openapi_probe.py \
+    CTX_PROJECT_ENDPOINT=<project> CTX_ECHO_URL=https://<echo-fqdn>
 ```
 
 LLM gateway (§4), all driven from inside the VNet:

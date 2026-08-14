@@ -56,7 +56,7 @@ change an architecture review — and two of them point in opposite directions.
 | **1. VNet + internal APIs** | Managed runtime calls the API; connection secret injected by the data proxy | Your code calls the API from its own sandbox; you resolve the secret yourself | Both work. Hosted **needs an explicit RBAC grant** that prompt agents never needed |
 | **2. Cold start** | No measurable idle de-allocation penalty | **~15 s to provision every new session**, plus a slow first serving turn | **Materially worse.** This is the biggest surprise |
 | **3. Code execution** | Delegate to Code Interpreter or an ACA session pool | Run in-process — ~100,000× faster, but **no isolation** | Different trade, not strictly better |
-| **4. Request context propagation** | No per-request channel to tools; per-user auth only via Toolbox/MCP connections | **`x-client-*` headers, `metadata` and `traceparent` all measured working** | Hosted is clearly ahead. **Neither offers generic OBO** |
+| **4. Request context propagation** | **`traceparent` + W3C `baggage` reach the tool** (measured); `x-client-*` and `metadata` do not; per-user auth via Toolbox/MCP | **`x-client-*` headers, `metadata` and `traceparent` all measured working** | Hosted is richer, but prompt agents are **not** empty-handed. **Neither offers generic OBO** |
 | **5. Existing LLM gateway** | Needs an admin-created **`ModelGateway` connection**; model is `<connection>/<model>` | Just set `base_url` in your own client | Both work. **Gemini is not in the Azure catalog**, so a gateway is the only route to it |
 | **6a. Custom telemetry & metrics** | Microsoft's traces only; instrument the *caller* | **Custom spans and metrics measured landing in App Insights *and* in a non-Azure OTLP backend** | Hosted only |
 | **6b. Library integration (DSPy)** | Not possible in the loop | **DSPy 3.3.0 installed and ran** | Hosted only |
@@ -341,11 +341,13 @@ they add a fast path that is only appropriate for trusted code.
 > represented through OBO versus custom metadata/header propagation?"*
 
 **Short answer.** Hosted agents have a real, working context channel — measured
-end to end. Prompt agents do not expose an equivalent per-request channel to
-tools; their user-identity story runs through Toolbox/MCP connection auth
-instead. **Neither type gives you generic OBO to an arbitrary internal API**:
-the caller's `Authorization` header is deliberately never delivered to agent
-code.
+end to end. Prompt agents have a **narrower but genuine** one: caller-supplied
+W3C `traceparent` and `baggage` were measured arriving at a downstream API,
+though `x-client-*` headers and `metadata` were not (§5.4.1). **Neither type
+gives you generic OBO to an arbitrary internal API**: the caller's
+`Authorization` header is deliberately never delivered to agent code. And
+because every one of these channels is caller-asserted, none of them is an
+authorization mechanism — see §5.7 for the distinction that decides the design.
 
 ## 5.1 What actually arrives — measured
 
@@ -422,17 +424,73 @@ HTTP calls.
 
 | Question | Answer | Label |
 |---|---|---|
-| Per-request custom headers into tool calls | **No documented mechanism** | [Documented — absence] |
+| Per-request custom headers into tool calls | **No** — `x-client-*` is dropped before the tool call | [Measured] |
+| Per-request custom context into tool calls | **Yes, via W3C `baggage`** — caller-supplied entries arrive | [Measured] |
 | Conversation/thread metadata | Yes: ≤16 pairs, key ≤64, value ≤512 chars | [Documented] |
 | Metadata auto-mapped into OpenAPI tool headers | **No** | [Documented — absence] |
 | Direct OpenAPI tool auth options | anonymous, connection (key/token), managed identity — **no user-token option** | [Documented] |
 | Per-user auth via MCP/Toolbox connections | **Yes** — `oauth2` and `user-entra-token` | [Documented] |
-| W3C trace context into every tool call | Not guaranteed | [Unknown] |
+| W3C trace context into every tool call | **Yes** — caller's trace id arrives at the API | [Measured] |
 
 So a prompt agent *can* act with a **specific user's** delegated permissions —
 but only through **Toolbox/MCP connections**, where Foundry manages consent,
-storage, refresh and injection. It cannot take a correlation id you supplied on
-this request and put it in an outbound API header.
+storage, refresh and injection.
+
+### 5.4.1 What reaches a downstream API — measured on the wire
+
+The claim "no mechanism for prompt agents" deserved testing rather than
+repeating, because the alternative for the customer is a redesign. A prompt
+agent was given an OpenAPI tool pointing at an echo API
+(`track-b/context-echo/`) that records every inbound header, then invoked with
+caller-supplied headers, `metadata`, a `traceparent` and a `baggage` header.
+**The API records the wire, so the model cannot flatter the result.**
+
+| Sent by caller | Reached the internal API? | Label |
+|---|---|---|
+| `x-client-tenant-id`, `x-client-correlation-id`, `x-client-end-user` | **No** | [Measured] |
+| Responses `metadata` object | **No** — not as headers, not as query | [Measured] |
+| `traceparent` | **Yes** — same trace id, new span id | [Measured] |
+| **`baggage`** | **Yes** — caller entries arrive, merged with the platform's | [Measured] |
+
+The exact bytes the API received:
+
+```text
+traceparent: 00-11112222333344445555666677778888-909d89b9288336d0-01
+baggage:     docusign_tenant = contoso-eu, docusign_corr = corr-prompt-77,
+             leaf_customer_span_id = 8e6fbb6cd61dad1f
+```
+
+The trace id is **byte-identical** to the one the caller sent, and the span id
+is a new child — correct W3C behaviour. So end-to-end correlation from your web
+tier, through the prompt agent, into your internal API works today with no
+custom plumbing.
+
+**`baggage` is the finding that changes the answer.** It is the W3C standard
+carrier for arbitrary key/value request context, and caller-supplied entries
+survive the whole path. Prompt agents therefore *do* have a per-request custom
+context channel — just not the `x-client-*` one hosted agents use.
+
+Four caveats, all of which matter before anyone builds on it:
+
+* **It is caller-asserted, so it is not authorization.** Identical rule to
+  `x-client-*` (§5.5). Fine for tenant routing, correlation, locale, feature
+  flags. Never for entitlement decisions.
+* **Oversized entries are silently dropped.** A ~2 KB baggage header arrived
+  intact; at ~8 KB the large entry vanished with **no error** while the small
+  entries survived. Do not put tokens or documents in it, and alert on absence
+  rather than assuming delivery. [Measured]
+* **Whitespace is re-serialized** — values came back as `key = value` with
+  spaces around the `=`. Parse tolerantly; use a real baggage library.
+* **This is not a documented product feature.** It is an observable consequence
+  of the platform's OpenTelemetry instrumentation, so it could change without
+  notice. Worth confirming as a supported contract with the product team before
+  it becomes load-bearing.
+
+**The model-mediated alternative, also measured.** Instructing the agent to pass
+`correlation_id` as a tool *parameter* worked — the value arrived as a query
+string. But the model decides whether to comply, the value is visible in
+conversation state, and it is reachable by prompt injection. Use it for
+convenience data, never for anything that matters.
 
 Passing context through the prompt is **not** a propagation mechanism: it has no
 integrity, is visible to the model, and is subject to prompt injection. Never use
@@ -483,9 +541,12 @@ invoking the agent; the agent reads it. Because the agent never trusts a
 caller-asserted value, forgery is not possible. This POC already demonstrated the
 storage half — private-endpoint Cosmos, keyless, ~745 ms write (§8.1).
 
-**4. `x-client-*` headers for non-authoritative context.**
+**4. `x-client-*` headers (hosted) or W3C `baggage` (either type) for
+non-authoritative context.**
 Correlation ids, locale, feature flags, request tags. Cheap, measured to work.
-Validate on arrival; never authorize on it.
+`baggage` is the only per-request custom channel that reaches a **prompt
+agent's** tools (§5.4.1); `x-client-*` does not survive that hop. Keep entries
+small, validate on arrival, and never authorize on either.
 
 **5. Egress gateway or sidecar** for deterministic header injection, destination
 allowlisting and audit — useful given that agent-sandbox egress is otherwise
@@ -523,6 +584,79 @@ end user ──auth──> your web/API tier ───────────�
 **Split of responsibilities.** Correlation and tracing: the platform, measured
 working. Authoritative identity and tenant: your context store or broker. Never
 the prompt.
+
+### 5.7.1 Why a context store, when the headers demonstrably work?
+
+A fair objection: §5.1 measured `x-client-*`, `metadata` and `traceparent`
+arriving intact, so why does the diagram add a store?
+
+**Because delivery and trust are different problems, and only delivery was
+measured.** The headers arrive reliably — that is settled. But they arrive
+*exactly as the caller wrote them*, and the platform performs no validation of
+their contents. Anything a caller asserts, a caller can forge. `x-client-end-user:
+alex@example.internal` is a string, not a proof.
+
+So the split is:
+
+| Context | Channel | Why |
+|---|---|---|
+| Correlation id, trace id, locale, feature flags | **Headers / baggage** | Forging them harms only the forger |
+| End-user identity, tenant, entitlements, roles | **Context store or broker** | An authorization decision depends on it |
+
+The store is keyed by `(agent_session_id, x-agent-user-id)` precisely so the
+agent never has to trust a value the caller supplied: the front door writes the
+authoritative record *after* it has authenticated the user, and the agent reads
+it back using platform-injected identifiers it did not receive from the caller.
+
+**When you can skip it.** This is a threat-model decision, not a rule. If the
+agent endpoint is reachable by exactly one caller — your own front door, over a
+private endpoint, holding the only principal with invoke rights — then
+"caller-asserted" and "trusted" collapse into the same thing, and headers alone
+are defensible. Write down that assumption, because it breaks the moment a
+second team is granted access to the project, or end users are allowed to call
+the agent directly.
+
+**The second reason is size.** Headers and baggage are small: `metadata` is
+capped at 16 pairs of ≤512 chars, and oversized baggage entries are dropped
+silently (§5.4.1). An entitlements list or a document-scope set does not fit. A
+store has no such ceiling, and the agent fetches only what it needs.
+
+### 5.7.2 The prompt-agent path
+
+The diagram above is the hosted-agent shape. For a prompt agent, Microsoft owns
+the loop, so there is no place to put your code between the ingress and the tool
+call. What survives is narrower:
+
+```text
+your web/API tier ──> Foundry ingress ──> prompt agent (Microsoft's loop)
+   traceparent: ...                                  │
+   baggage: tenant=...,corr=...                      │ platform forwards
+   (x-client-* and metadata stop here)               │ traceparent + baggage
+                                                     ▼
+                            ┌────────────────────────┴──────────────┐
+                            ▼                                       ▼
+                   OpenAPI tool ──> internal API          Toolbox / MCP tool
+              (reads traceparent + baggage;              (per-user oauth2 /
+               resolves authoritative context             user-entra-token —
+               from the store, keyed by tenant            Foundry injects the
+               + correlation id)                          token, not you)
+```
+
+Two practical routes for "get DocuSign context into an internal API":
+
+1. **Correlation-only, then resolve server-side.** Put a correlation id in
+   `baggage`, and have the internal API — or a thin facade in front of it — look
+   the authoritative context up from the same store the front door wrote to.
+   This is the §5.7.1 pattern with the *API*, rather than the agent, doing the
+   lookup, and it is the closest prompt-agent equivalent of the hosted design.
+2. **Per-tenant connections.** Bind identity to the tool configuration instead of
+   the request: a separate connection (and agent version) per tenant, so the
+   downstream credential is inherently scoped and nothing needs to travel
+   per-request. Costs you N agents, buys you no trust problem.
+
+For **per-user** authorization, neither route applies — use Toolbox/MCP
+connection auth (pattern 1 in §5.6), which is the only mechanism where Foundry
+itself vouches for the user.
 
 ---
 
@@ -1175,6 +1309,8 @@ That tension is the real decision, and §10 covers it.
 | **BYO Cosmos wiring for hosted threads** | Documented containers | **Mapping undocumented** | [Unknown] |
 | **Observability** | Portal + tracing | Same, plus your own logs; container log stream is essential | [Measured] |
 | **Custom request headers to agent** | No documented mechanism | **`x-client-*` only**; others dropped | [Measured] |
+| **Custom context to a downstream API** | **W3C `baggage`** (small entries only) | `x-client-*`, `metadata`, `baggage` | [Measured] |
+| **Caller trace id reaches the internal API** | **Yes** | **Yes** | [Measured] |
 | **Request `metadata` to agent code** | Conversation metadata (≤16 pairs) | **Yes**, verbatim | [Measured] |
 | **W3C trace context into the agent** | Not guaranteed | **Yes** — same trace id end to end | [Measured] |
 | **Caller `Authorization` visible to agent** | n/a | **No — always stripped** | [Measured] |
@@ -1247,7 +1383,8 @@ Requirement 5 added five more **[Measured]**:
 | 22 | Foundry Memory ingestion returned `401` to its own model deployment | Reproduced on a **public** project too, so it is not the VNet; survived three RBAC grants |
 | 23 | Memory items need an explicit `"type": "message"` | Plain `role`/`content` fails with *"Failed to parse item with unknown/missing type"* |
 | 24 | Memory model fields are `chat_model` / `embedding_model` | Not `*_deployment_name` on the options object, which raises `TypeError` |
-| 25 | A new agent version does **not** evict warm sandboxes | The first invoke after publishing `:3` ran `:2`'s code; re-invoke until the reported instance id changes, or you will measure the old build |
+| 25 | Oversized W3C `baggage` entries are **silently dropped** | ~2 KB arrives intact; at ~8 KB the large entry vanishes with no error while small ones survive — alert on absence, never assume delivery |
+| 26 | A new agent version does **not** evict warm sandboxes | The first invoke after publishing `:3` ran `:2`'s code; re-invoke until the reported instance id changes, or you will measure the old build |
 
 Connection creation also returned `InternalServerError` three times in a row
 before succeeding on the fourth with an unchanged payload — **retry before
@@ -1332,6 +1469,21 @@ export AZ_SUBSCRIPTION=<subscription-id>
     TRACKD_PROMPT="Call echo_request_context and report the raw JSON." \
     'TRACKD_HEADERS=x-client-tenant-id=contoso,x-client-correlation-id=corr-1,traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' \
     'TRACKD_METADATA={"tenant":"contoso"}'
+```
+
+Requirement 4 — what a **prompt agent** propagates to an internal API:
+
+```bash
+# an echo API that records every header it receives, and serves its own spec
+./track-b/context-echo/deploy-echo.sh        # needs ECHO_ACA_ENV=<aca-env-id>
+
+# prompt agent + OpenAPI tool; asserts on the wire, not the model's summary
+./track-d/run-in-vnet.sh ctx_openapi_probe.py \
+    CTX_PROJECT_ENDPOINT=<project> CTX_ECHO_URL=https://<echo-fqdn>
+
+# the model-mediated variant, and the baggage size ceiling
+./track-d/run-in-vnet.sh ctx_openapi_probe.py ... CTX_MODEL_MEDIATED=1
+./track-d/run-in-vnet.sh ctx_openapi_probe.py ... CTX_BAGGAGE_PAD=8000
 ```
 
 Requirement 5 — the LLM gateway:
