@@ -1289,6 +1289,61 @@ Two SDK details that cost time, if anyone reproduces this: the model fields are
 `"type": "message"` or ingestion fails with *"Failed to parse item with
 unknown/missing type"*. [Measured]
 
+### 7.6.1 Can a *hosted* agent use Foundry Memory the way a prompt agent does?
+
+Short answer: **it can reach the service, but it does not get the declarative
+binding.** The two halves are worth separating.
+
+**The binding is a tool, and hosted agents have no tool list.** Inspecting the
+shipped SDK (2.4.0) rather than the docs:
+
+| Model | Relevant fields |
+|---|---|
+| `MemorySearchPreviewTool` | `memory_store_name`, `scope`, `search_options`, `update_delay` |
+| `PromptAgentDefinition` | `instructions`, `model`, **`tools`**, `tool_choice`, `text`, … |
+| `HostedAgentDefinition` | `code_configuration`, `container_configuration`, `cpu`, `memory`, `environment_variables`, `protocol_versions`, `telemetry_config` |
+
+Foundry Memory attaches to an agent as the `memory_search_preview` **tool**,
+which goes in a `tools` list. `PromptAgentDefinition` has one;
+`HostedAgentDefinition` **does not** — a hosted agent brings its own harness, so
+there is nothing for the platform to inject a tool into. Retrieval *and* the
+automatic write-back implied by `update_delay` are therefore prompt-agent
+conveniences. [Measured]
+
+> ⚠️ **Do not misread `HostedAgentDefinition.memory`.** It is the container's
+> **RAM** (`1Gi`), not the memory service. The name collision is an easy and
+> expensive mistake to make. [Measured]
+
+**But the API is reachable from inside the sandbox.** A `probe_memory` tool was
+added to the hosted agent and called the memory API as an ordinary client using
+the sandbox's own identity:
+
+```text
+list_ok=true  list_ms=204..391  stores=['docusign-longterm-memory']
+```
+
+So the hosted agent can see the project's memory stores over the private
+network, with no extra RBAC beyond the `Foundry User` role its instance
+identity already held. Nothing about hosted agents is fenced off from the
+service. [Measured]
+
+**What could not be confirmed.** `search_memories` from inside the sandbox
+returned `HttpResponseError: (Timeout) The operation was timeout`, and the store
+is empty because ingestion is still blocked by the 401 above. Retrieval quality,
+cross-conversation recall and scope isolation therefore remain **`[Unknown]`**
+for both agent types — this document does not claim them.
+
+**Practical reading for DocuSign.**
+
+* A prompt agent gets managed memory by adding a tool: no code, but no control
+  either.
+* A hosted agent must **own the memory loop** — search at turn start, write back
+  at turn end, from its own code. That is more work, and it is also the option
+  that lets DocuSign choose the store, which is what the IP requirement (§7.7)
+  actually wants.
+* Given the ingestion failure, the Cosmos-backed pattern already measured in
+  §8.1 remains the recommendation for hosted agents until Memory leaves preview.
+
 ## 7.7 IP protection — where DocuSign data actually sits
 
 Mostly a consolidation of §2 plus Microsoft's published commitments.
@@ -1375,6 +1430,8 @@ That tension is the real decision, and §10 covers it.
 | **Custom OTel spans from inside the agent** | **No** — instrument the caller | **Yes**, with customer dimensions | [Measured] |
 | **Custom OTel metrics from inside the agent** | **No** | **Yes** — counter and histogram measured | [Measured] |
 | **Export telemetry to non-Azure backend** | Indirect — via Azure Monitor export hop | **Yes** via `OTEL_EXPORTER_OTLP_*`; traces, metrics and logs all arrived | [Measured] |
+| **Foundry Memory as a declarative binding** | **Yes** — `memory_search_preview` tool | **No** — no `tools` list on the definition | [Measured] |
+| **Foundry Memory API reachable from agent code** | n/a — platform calls it | **Yes** — `list()` in ~200 ms from the sandbox | [Measured] |
 | **Custom dimensions on the platform's spans** | **No** — dimension set is entirely Microsoft's | n/a — you own the span | [Measured] |
 | **Caller trace id becomes `operation_Id`** | **Yes** | **Yes** | [Measured] |
 | **Prompt/completion text written to App Insights** | **Yes** — `gen_ai.input/output.messages` | Yes, if Azure Monitor is configured | [Measured] |
@@ -1443,8 +1500,9 @@ Requirement 5 added five more **[Measured]**:
 | 22 | Foundry Memory ingestion returned `401` to its own model deployment | Reproduced on a **public** project too, so it is not the VNet; survived three RBAC grants |
 | 23 | Memory items need an explicit `"type": "message"` | Plain `role`/`content` fails with *"Failed to parse item with unknown/missing type"* |
 | 24 | Memory model fields are `chat_model` / `embedding_model` | Not `*_deployment_name` on the options object, which raises `TypeError` |
-| 25 | Oversized W3C `baggage` entries are **silently dropped** | ~2 KB arrives intact; at ~8 KB the large entry vanishes with no error while small ones survive — alert on absence, never assume delivery |
-| 26 | A new agent version does **not** evict warm sandboxes | The first invoke after publishing `:3` ran `:2`'s code; re-invoke until the reported instance id changes, or you will measure the old build |
+| 25 | `HostedAgentDefinition.memory` is container **RAM**, not Foundry Memory | Reads like a memory-service binding; it takes `1Gi`. The memory service attaches as the `memory_search_preview` *tool*, which hosted agents cannot take |
+| 26 | Oversized W3C `baggage` entries are **silently dropped** | ~2 KB arrives intact; at ~8 KB the large entry vanishes with no error while small ones survive — alert on absence, never assume delivery |
+| 27 | A new agent version does **not** evict warm sandboxes | The first invoke after publishing `:3` ran `:2`'s code; re-invoke until the reported instance id changes, or you will measure the old build |
 
 Connection creation also returned `InternalServerError` three times in a row
 before succeeding on the fourth with an unchanged payload — **retry before

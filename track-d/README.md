@@ -38,6 +38,7 @@ variable you care about on every run.
 | `gateway_agent_probe.py` | Requirement 5: BYOM through a `ModelGateway` connection on the v2 agents API |
 | `fs_memory_probe.py` | Requirement 6: is the sandbox filesystem memory? Three turns across two conversations |
 | `memory_probe.py` | Requirement 6: Foundry Memory — create a store, ingest, recall across conversations, check scope isolation |
+| `mem_binding_probe.py` | Requirement 6: does either agent definition expose a Foundry Memory binding? Inspects the shipped SDK models |
 | `sink_check.py` | Requirement 6: read the third-party OTLP sink's received-telemetry log (its FQDN only resolves in-VNet) |
 
 ## Agents

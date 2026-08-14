@@ -311,6 +311,65 @@ def probe_runtimes() -> str:
     })
 
 
+@tool
+def probe_memory(
+    scope: Annotated[str, "Memory scope (namespace) to search, e.g. user-alice."],
+    query: Annotated[str, "What to recall from long-term memory."],
+) -> str:
+    """Call the Foundry Memory service directly from inside the hosted sandbox.
+
+    Hosted agents get no declarative memory binding - the memory_search_preview
+    tool attaches to a prompt agent definition, which a hosted agent does not
+    have. So the only route is to be an ordinary client of the memory API using
+    the sandbox's own identity. This measures whether that route works.
+    """
+    out = {"scope": scope, "store": os.environ.get("MEMORY_STORE", "docusign-longterm-memory")}
+    try:
+        from azure.ai.projects import AIProjectClient
+
+        client = AIProjectClient(endpoint=PROJECT_ENDPOINT, credential=_credential)
+        memory = client.beta.memory_stores
+
+        started = time.time()
+        stores = [s.name for s in memory.list()]
+        out["list_ok"] = True
+        out["list_ms"] = int((time.time() - started) * 1000)
+        out["stores"] = stores[:10]
+
+        started = time.time()
+        result = memory.search_memories(out["store"], scope=scope, items=query)
+        items = list(
+            getattr(result, "results", None) or getattr(result, "data", None) or []
+        )
+        out["search_ok"] = True
+        out["search_ms"] = int((time.time() - started) * 1000)
+        out["hits"] = len(items)
+        out["recalled"] = [str(getattr(i, "content", i))[:160] for i in items[:3]]
+
+        # Ingestion previously failed 401 when called from a job identity; retry
+        # here because the sandbox identity is a different principal.
+        if os.environ.get("MEMORY_TRY_INGEST") == "1":
+            started = time.time()
+            try:
+                poller = memory.begin_update_memories(
+                    out["store"],
+                    scope=scope,
+                    items=[
+                        {"type": "message", "role": "user",
+                         "content": "I always sign envelopes with a click-to-sign signature."},
+                    ],
+                )
+                poller.result()
+                out["ingest_ok"] = True
+            except Exception as exc:  # noqa: BLE001
+                out["ingest_ok"] = False
+                out["ingest_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+            out["ingest_ms"] = int((time.time() - started) * 1000)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
+    return json.dumps(out)
+
+
 def _build_chat_model() -> ChatOpenAI:
     project = AIProjectClient(endpoint=PROJECT_ENDPOINT, credential=_credential)
     openai_client = project.get_openai_client()
@@ -327,7 +386,7 @@ def _build_chat_model() -> ChatOpenAI:
 def main() -> None:
     graph = create_agent(
         _build_chat_model(),
-        tools=[probe_telemetry, probe_dspy, probe_filesystem, probe_runtimes],
+        tools=[probe_telemetry, probe_dspy, probe_filesystem, probe_runtimes, probe_memory],
     )
     ResponsesHostServer(graph).run(port=int(os.environ.get("PORT", "8088")))
 
