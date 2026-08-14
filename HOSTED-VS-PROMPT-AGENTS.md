@@ -1328,10 +1328,18 @@ identity already held. Nothing about hosted agents is fenced off from the
 service. [Measured]
 
 **What could not be confirmed.** `search_memories` from inside the sandbox
-returned `HttpResponseError: (Timeout) The operation was timeout`, and the store
-is empty because ingestion is still blocked by the 401 above. Retrieval quality,
-cross-conversation recall and scope isolation therefore remain **`[Unknown]`**
+returned `HttpResponseError: (Timeout) The operation was timeout`, reproduced on
+separate invocations while `list()` kept succeeding in the same call. The store
+is empty because ingestion is still blocked by the 401 above, so retrieval
+quality, cross-conversation recall and scope isolation remain **`[Unknown]`**
 for both agent types — this document does not claim them.
+
+One operational detail matters more than the failure itself: the agent turn took
+**163 s**, because the search **hung** rather than failing fast. A dependency
+that blocks for minutes inside a request path is worse than one that errors
+immediately. If DocuSign puts Memory on a user-facing turn, wrap the call in an
+explicit client-side timeout and a fallback — do not rely on the service to
+fail quickly. [Measured]
 
 **Practical reading for DocuSign.**
 
