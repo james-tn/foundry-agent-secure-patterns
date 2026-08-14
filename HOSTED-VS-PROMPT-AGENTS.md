@@ -58,7 +58,7 @@ change an architecture review — and two of them point in opposite directions.
 | **3. Code execution** | Delegate to Code Interpreter or an ACA session pool | Run in-process — ~100,000× faster, but **no isolation** | Different trade, not strictly better |
 | **4. Request context propagation** | **`traceparent` + W3C `baggage` reach the tool** (measured); `x-client-*` and `metadata` do not; per-user auth via Toolbox/MCP | **`x-client-*` headers, `metadata` and `traceparent` all measured working** | Hosted is richer, but prompt agents are **not** empty-handed. **Neither offers generic OBO** |
 | **5. Existing LLM gateway** | Needs an admin-created **`ModelGateway` connection**; model is `<connection>/<model>` | Just set `base_url` in your own client | Both work. **Gemini is not in the Azure catalog**, so a gateway is the only route to it |
-| **6a. Custom telemetry & metrics** | Microsoft's traces only; instrument the *caller* | **Custom spans and metrics measured landing in App Insights *and* in a non-Azure OTLP backend** | Hosted only |
+| **6a. Custom telemetry & metrics** | Microsoft's traces only, but **correlated to your trace id** (measured); no custom dimensions or metrics | **Custom spans and metrics measured landing in App Insights *and* in a non-Azure OTLP backend** | Hosted for injection; both for correlation |
 | **6b. Library integration (DSPy)** | Not possible in the loop | **DSPy 3.3.0 installed and ran** | Hosted only |
 | **6c. Filesystem memory** | n/a | Writable 4.1 GB disk, **persists per conversation, not across them** | Short-term yes, long-term no |
 | **6d. Multi-language execution** | Session pools: Node, Shell, C#, GPU, custom | Same pools; runtime itself is Python | Both, via pools |
@@ -1055,17 +1055,66 @@ dependencies, and the exporter is the stock `opentelemetry-exporter-otlp-proto-h
 package added to the agent's `requirements.txt`.
 
 
-**For prompt agents the honest answer is different.** Foundry emits rich
-server-side traces, but Microsoft owns the loop, so DocuSign's own code is not
-running inside it. Custom instrumentation happens in the *calling* application,
-where W3C `traceparent` propagation correlates the client span with the Foundry
-run. There is **no documented way to attach arbitrary customer dimensions to
-Microsoft's server spans, and no way to emit custom metrics from inside a
-prompt-agent run.** [Documented / Not documented]
+### 7.2.2 Prompt agents — measured, not assumed
+
+This was previously recorded as "no documented way", which is a statement about
+documentation rather than behaviour. It has now been tested: a prompt agent was
+invoked with `metadata`, `x-client-*` headers, a `traceparent` and a `baggage`
+header, and the resulting traces were read back out of App Insights.
+
+**The good news — correlation is solved.** Foundry's server spans carried
+`operation_Id = 11112222333344445555666677778888`, which is **byte-identical to
+the trace id the caller sent**. [Measured]
+
+```text
+dependency  invoke_agent ctx-openapi-probe:3    operation_Id=1111...8888
+dependency  execute_tool remote_openapi...      operation_Id=1111...8888
+dependency  chat gpt-4o-mini-2024-07-18         operation_Id=1111...8888
+```
+
+So DocuSign's own telemetry and Microsoft's join on the standard W3C key with no
+custom plumbing, whichever backend each lands in. Combined with §5.4.1 — where
+the same trace id reaches the internal API — a single trace id spans web tier →
+Foundry → tool → internal API.
+
+**The bad news — you cannot add your own dimensions.** The complete customer-
+controllable dimension set on `invoke_agent` is: nothing. Every dimension is
+Microsoft's:
+
+```text
+gen_ai.agent.id / .name / .version      gen_ai.conversation.id
+gen_ai.operation.name                   gen_ai.request.model / .response.model
+gen_ai.input.messages                   gen_ai.output.messages
+gen_ai.tool.definitions                 gen_ai.provider.name
+microsoft.foundry.project.id            microsoft.foundry.content_filter.results
+microsoft.a365.agent.blueprint.id       span_type
+```
+
+Neither `metadata` nor `baggage` appeared as a dimension anywhere. A targeted
+query for the customer's own values (`contoso`, `corr-prompt-77`) across
+dependencies, requests, traces, customEvents and customMetrics matched **only**
+inside `gen_ai.input.messages`, `gen_ai.output.messages` and
+`gen_ai.tool.call.arguments` — i.e. as free text, and only because the
+model-mediated variant put it there. That is prose in a blob, not a queryable
+dimension, and it depends on the model's compliance. **No custom metrics can be
+emitted from inside a prompt-agent run.** [Measured]
+
+> ⚠️ **IP-protection note.** `gen_ai.input.messages` and `gen_ai.output.messages`
+> contain the **full prompt and completion text**, including system
+> instructions. In this configuration DocuSign's prompts — which they consider
+> IP (§7.7) — are written to Application Insights. Confirm content-capture
+> settings before enabling tracing in production. [Measured]
+
+**Reaching a non-Azure backend.** The project's tracing target is an
+Application Insights connection, so prompt-agent telemetry lands in Azure Monitor
+first. Getting it to Datadog or Splunk means an export hop — diagnostic settings
+to Event Hub, then a forwarder — rather than the direct OTLP exporter a hosted
+agent can use (§7.2.1). [Documented]
 
 > If "inject DocuSign telemetry and metrics" means *from inside the agent*,
 > that is a hosted-agent capability. Prompt agents give you Microsoft's
-> telemetry plus whatever you record around the call.
+> telemetry, correctly correlated to your trace id, plus whatever your own
+> services record at the tool boundary.
 
 ## 7.3 DSPy and arbitrary libraries
 
@@ -1260,6 +1309,12 @@ Two items worth raising on the call rather than burying:
   process, which removes human review and its storage. For a company handling
   signature documents this is usually the first thing legal asks about.
   [Documented]
+* **Tracing writes prompts and completions to Application Insights.** Measured
+  on a prompt agent: `gen_ai.input.messages` carried the full system
+  instructions and user input, `gen_ai.output.messages` the model's reply. If
+  prompts are IP, the observability store is part of the IP boundary — apply
+  the same retention, RBAC and CMK review you would apply to the agent's data
+  store. [Measured]
 * **Hosted-agent code confidentiality is not documented.** Microsoft documents
   *that* a ZIP is uploaded, but not where it is stored, how long it is kept
   after deletion, whether CMK applies, or which personnel can access it. If
@@ -1269,9 +1324,11 @@ Two items worth raising on the call rather than burying:
 
 ## 7.8 Recommendation for these three new requirements
 
-Custom telemetry from inside the agent, DSPy, and filesystem working memory are
-**all hosted-agent capabilities and none of them are prompt-agent
-capabilities**. Combined with §6, where the gateway argument ran the other way,
+Custom telemetry *from inside the agent*, DSPy, and filesystem working memory
+are **all hosted-agent capabilities and none of them are prompt-agent
+capabilities**. The one qualification is correlation: prompt-agent spans do
+carry the caller's trace id, so DocuSign's telemetry joins Microsoft's even
+though DocuSign cannot add fields to it (§7.2.2). Combined with §6, where the gateway argument ran the other way,
 the honest summary is that these requirements pull in opposite directions:
 
 * Telemetry, DSPy and filesystem memory → **hosted agents**.
@@ -1317,7 +1374,10 @@ That tension is the real decision, and §10 covers it.
 | **Per-user delegated auth (OBO)** | Toolbox/MCP `oauth2`, `user-entra-token` | Same, via Toolbox | [Documented] |
 | **Custom OTel spans from inside the agent** | **No** — instrument the caller | **Yes**, with customer dimensions | [Measured] |
 | **Custom OTel metrics from inside the agent** | **No** | **Yes** — counter and histogram measured | [Measured] |
-| **Export telemetry to non-Azure backend** | No | **Yes** via `OTEL_EXPORTER_OTLP_*`; traces, metrics and logs all arrived | [Measured] |
+| **Export telemetry to non-Azure backend** | Indirect — via Azure Monitor export hop | **Yes** via `OTEL_EXPORTER_OTLP_*`; traces, metrics and logs all arrived | [Measured] |
+| **Custom dimensions on the platform's spans** | **No** — dimension set is entirely Microsoft's | n/a — you own the span | [Measured] |
+| **Caller trace id becomes `operation_Id`** | **Yes** | **Yes** | [Measured] |
+| **Prompt/completion text written to App Insights** | **Yes** — `gen_ai.input/output.messages` | Yes, if Azure Monitor is configured | [Measured] |
 | **Arbitrary PyPI libraries (DSPy)** | **No** | **Yes** — DSPy 3.3.0 ran a real program | [Measured] |
 | **Agent runtime language** | n/a | **Python-only in practice**; Python/C# documented, or BYO image | [Measured] |
 | **Session pool languages** | `PythonLTS`, `NodeLTS`, `Shell`, `CsharpLTS`, `GpuBase`, `CustomContainer` | Same | [Measured] |
@@ -1518,6 +1578,13 @@ Requirement 6 — telemetry, libraries, filesystem and languages:
     TRACKD_PROMPT='Call probe_telemetry with marker "dsmark-alpha-01".'
 az monitor app-insights query --app <app-id> --analytics-query \
     "union dependencies, customMetrics | where name startswith 'docusign'"
+
+# prompt agents: can YOUR context become a dimension on Microsoft's spans?
+# (it cannot - this returns matches only inside message-content blobs)
+az monitor app-insights query --app <app-id> --analytics-query \
+    "union dependencies,requests,traces,customEvents,customMetrics
+     | where tostring(customDimensions) has_cs 'contoso'
+     | summarize by itemType, name"
 
 # DSPy, and the sandbox runtime inventory
 ./track-d/run-in-vnet.sh invoke_agent.py TRACKD_AGENT_NAME=trackd-plat \
