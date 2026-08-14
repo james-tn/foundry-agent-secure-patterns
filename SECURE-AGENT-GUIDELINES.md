@@ -75,7 +75,7 @@ genuinely variable surface, and it is the subject of Part 2.
 Applies to every deployment. Steps 1–3 are **create-time decisions** that are
 expensive or impossible to reverse.
 
-### Step 1 — Create the Foundry account network-injected [Verified]
+## Step 1 — Create the Foundry account network-injected [Verified]
 
 ```jsonc
 // Microsoft.CognitiveServices/accounts  (kind: AIServices)
@@ -103,7 +103,7 @@ entire guideline does not apply.
 > region.
 > ([ref](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/virtual-networks#limitations))
 
-### Step 2 — Lay out the VNet [Verified]
+## Step 2 — Lay out the VNet [Verified]
 
 Minimum three subnets. A fourth and fifth appear in Part 2 if you need hybrid
 DNS or egress inspection.
@@ -127,7 +127,7 @@ Hard constraints:
 > The portal does not surface delegated-subnet IP utilization. A /27 that
 > silently exhausts is a hard failure mode. Use /24.
 
-### Step 3 — Private endpoints and private DNS zones [Verified]
+## Step 3 — Private endpoints and private DNS zones [Verified]
 
 Foundry creates **only its own** private endpoint. Platform-dependency PEs are
 **not auto-created** — this is the single most common deployment failure.
@@ -149,7 +149,7 @@ Reference:
 [DNS zone configuration summary](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/virtual-networks#dns-zone-configurations-summary)
 · [Private endpoint DNS](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-dns)
 
-### Step 4 — Provision the platform dependencies [Verified]
+## Step 4 — Provision the platform dependencies [Verified]
 
 All three, all with public access disabled, all reachable privately.
 
@@ -158,7 +158,7 @@ Foundry account (the primary region had no Standard Search capacity) and
 attached it through a private endpoint in the Foundry account’s region. Useful escape hatch for
 capacity constraints — at the cost of cross-region latency and egress.
 
-### Step 5 — Capability hosts [Verified]
+## Step 5 — Capability hosts [Verified]
 
 The most-missed resource. Two of them, at two different scopes:
 
@@ -176,7 +176,7 @@ accounts/<account>/projects/<project>/capabilityHosts/<name>
 
 Without these the account looks correctly configured and agents still fail.
 
-### Step 6 — RBAC for the project managed identity [Verified]
+## Step 6 — RBAC for the project managed identity [Verified]
 
 | Role | Scope |
 |---|---|
@@ -191,7 +191,7 @@ Without these the account looks correctly configured and agents still fail.
 Prefer managed identity over keys everywhere the service supports it. In the reference deployment all four platform connections used
 `authType: AAD`; only the legacy internal business API required a key.
 
-### Step 7 — Plan human and CI access [Verified]
+## Step 7 — Plan human and CI access [Verified]
 
 With `publicNetworkAccess: Disabled` the **data plane is private too**. Anything
 that talks to the agent must be inside the network or privately connected:
@@ -203,7 +203,7 @@ that talks to the agent must be inside the network or privately connected:
 
 This routinely surprises teams mid-project. Decide it during design.
 
-### Foundation checklist
+## Foundation checklist
 
 - [ ] Account created with `networkInjections` — **not** retrofitted
 - [ ] `publicNetworkAccess: Disabled` and `customSubDomainName` set

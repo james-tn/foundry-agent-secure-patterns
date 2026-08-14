@@ -86,6 +86,10 @@ change an architecture review — and two of them point in opposite directions.
 | **6c. Filesystem memory** | n/a | Writable 4.1 GB disk, **persists per conversation, not across them** | Short-term yes, long-term no |
 | **6d. Multi-language execution** | Session pools: Node, Shell, C#, GPU, custom | Same pools; runtime itself is Python | Both, via pools |
 
+> **Architecture diagrams.** The mixed-estate reference architecture and a
+> per-scenario lane-selection flow are in
+> [`README.md`](README.md#reference-architecture).
+
 **The five findings most worth raising in a design review:**
 
 1. **Hosted agents ship with zero RBAC.** The platform creates two Entra

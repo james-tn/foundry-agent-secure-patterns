@@ -1,32 +1,176 @@
 # Azure AI Foundry Agent Service — POC findings
 
 A hands-on POC that deployed a network-isolated Foundry Agent Service
-environment and measured its real behaviour, to answer three questions that come
-up in nearly every enterprise evaluation:
+environment and **measured its real behaviour live in Azure**, rather than
+sourcing answers from documentation.
 
-1. Can agents reach **private internal APIs** from inside a VNet?
-2. Is there a **cold-start / de-allocation** penalty, and can agents be kept alive?
-3. What are the viable **code-execution** patterns and their trade-offs?
+It started with three questions that come up in nearly every enterprise
+evaluation — private API access, cold start, and code execution — and was then
+extended to a fuller enterprise requirement list: request-context propagation,
+an existing multi-provider LLM gateway, custom telemetry, library integration,
+memory and IP protection. Each requirement was answered twice: once with
+**prompt agents** (configuration, Foundry-managed runtime) and once with
+**hosted agents** (your own LangGraph code in a managed sandbox).
 
-Everything below was **measured live in Azure**, not sourced from documentation.
+- Built **2026-08-04 → 08-05** · re-validated **08-06** · hosted agents **08-12 → 08-14**
+- Two regions, Standard Agent Setup with network injection, `publicNetworkAccess=Disabled`
+- Claims are labelled by evidence: **[Measured]** / **[Documented]** /
+  **[Unknown]** in the findings documents, and **[Verified]** / **[Documented]** /
+  **[Inferred]** in the standalone guideline
 
-- Built **2026-08-04 → 08-05** · re-validated **08-06** · demos rehearsed **08-07**
-- Two regions, `gpt-4.1`, Standard Agent Setup with network injection
-
-> During re-validation we **disproved two of our own conclusions**. Both are
-> documented in [`VALIDATION.md`](VALIDATION.md) rather than quietly corrected.
-
-> **Want the reusable guidance rather than the evidence?**
-> [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) is a standalone
-> guideline for deploying Foundry agents securely in any enterprise — private
-> networking, reaching internal and on-premises APIs, latency, and code
-> execution. It contains **no customer, subscription or tenant specifics** and
-> every claim is tagged Verified / Documented / Inferred. Share that file on its
-> own; this repo is the evidence behind it.
+> An independent re-validation pass **overturned two conclusions** from the
+> first run. Both corrections are recorded in
+> [`VALIDATION.md`](VALIDATION.md) rather than quietly applied.
 
 ---
 
-## The three questions, answered
+## Where to start
+
+| If you want… | Read |
+|---|---|
+| The **requirement-by-requirement answer** for an architecture review | [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) — start at its **Requirement map** |
+| **Reusable guidance** for any enterprise — no customer, subscription or tenant specifics, safe to share on its own | [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) |
+| The **raw prompt-agent evidence** behind the numbers | [`FINDINGS.md`](FINDINGS.md) |
+| What was **re-tested and corrected** | [`VALIDATION.md`](VALIDATION.md) |
+| To **run the demos** | [`DEMO-RUNBOOK.md`](DEMO-RUNBOOK.md), and [Running the demos](#running-the-demos) below |
+
+## Contents
+
+1. [Reference architecture](#reference-architecture)
+2. [Choosing a lane per scenario](#choosing-a-lane-per-scenario)
+3. [The three original questions, answered](#the-three-original-questions-answered)
+4. [Hosted agents — would they change any of this?](#hosted-agents--would-they-change-any-of-this)
+5. [What actually drives latency](#what-actually-drives-latency)
+6. [Platform notes and current limitations](#platform-notes-and-current-limitations)
+7. [Repository index](#repository-index)
+8. [Running the demos](#running-the-demos)
+9. [Methodology note](#methodology-note)
+
+---
+
+## Reference architecture
+
+Both agent types deployed into **one** locked-down Foundry account and **one**
+customer VNet, sharing the same connections, private endpoints, session pools
+and state store. Every box below was deployed and measured in this POC unless
+noted.
+
+```mermaid
+flowchart TB
+  APP["<b>DocuSign application tier</b><br/>authenticates the user · mints traceparent + baggage<br/>writes authoritative context to a server-side store"]
+
+  subgraph FOUNDRY["Foundry account — publicNetworkAccess: Disabled, network-injected into your VNet"]
+    PDEF["<b>Lane A · Prompt agent</b><br/>configuration only<br/>Foundry-managed runtime"]
+    PROXY["Managed data proxy<br/>injects connection secrets<br/><i>no keys in your code</i>"]
+    SBX["<b>Lane B · Hosted agent</b><br/>your LangGraph harness in adc-sandbox<br/>own Entra identity · <b>zero RBAC by default</b><br/>conversation-scoped disk · custom OTel · DSPy"]
+    CONN["Project connections<br/>CustomKeys · <b>ModelGateway</b> · Memory"]
+  end
+
+  subgraph VNET["Customer VNet — delegated subnets, private endpoints, no public exposure"]
+    INTAPI["<b>Internal DocuSign APIs</b><br/>private DNS only"]
+    POOL["<b>ACA session pools</b><br/>Python · Node · Shell · C#<br/>EgressDisabled, pinned packages"]
+    GW["<b>DocuSign LLM gateway</b><br/>OpenAI-compatible · <b>must speak SSE</b>"]
+    STATE[("Cosmos DB<br/>session + long-term state")]
+  end
+
+  PROV["<b>Model providers</b><br/>Azure catalog natively: OpenAI · Anthropic · Meta · Mistral · xAI<br/><b>Gemini is not in the catalog — the gateway is the only route</b>"]
+  OBS["Telemetry — App Insights always<br/><b>hosted also exports OTLP to Datadog / Splunk</b>"]
+
+  APP -->|"traceparent + baggage"| PDEF
+  APP -->|"x-client-* · metadata · traceparent"| SBX
+  CONN -.-> PROXY
+  CONN -.-> SBX
+  PDEF --> PROXY
+
+  PROXY --> INTAPI
+  PROXY --> POOL
+  PROXY --> GW
+  SBX --> INTAPI
+  SBX --> POOL
+  SBX --> GW
+  SBX --> STATE
+
+  GW --> PROV
+  PDEF -.->|"Microsoft spans only"| OBS
+  SBX -->|"custom spans + metrics"| OBS
+
+  classDef lane fill:#dae8fc,stroke:#6c8ebf,color:#12315e
+  classDef ok fill:#d5e8d4,stroke:#82b366,color:#1b5e20
+  classDef note fill:#fff2cc,stroke:#d6b656,color:#7f6000
+  class PDEF,SBX lane
+  class APP,PROXY,CONN,INTAPI,POOL,GW,STATE,OBS ok
+  class PROV note
+```
+
+**Reading it.** Blue = the two agent lanes. The split that matters is
+*credential and control ownership*: Lane A's secrets are injected by a
+Foundry-managed proxy and its telemetry is Microsoft's, while Lane B resolves
+its own credentials with its own Entra identity and can emit anything it likes —
+including OTLP straight to a non-Azure backend. Everything below the Foundry
+box is shared, so choosing per-scenario costs no extra infrastructure.
+
+Three things the diagram deliberately makes visible:
+
+- **The gateway is a governance boundary only in Lane A.** A prompt agent
+  reaches it through an admin-owned `ModelGateway` connection; a hosted agent
+  sets `base_url` to whatever its sandbox can reach, and the sandbox has
+  unrestricted outbound internet. Enforcement for Lane B is subnet egress
+  control, not a platform feature.
+- **Context arrives, but by different channels.** `traceparent` and `baggage`
+  survive into Lane A's tools; Lane B additionally receives `x-client-*` headers
+  and `metadata` verbatim. Neither receives the caller's `Authorization`, so a
+  server-side context store and a token broker are DocuSign-side components in
+  both cases.
+- **Untrusted code never runs in the agent process.** In-process execution in
+  Lane B is ~100,000× faster but shares the agent's identity, environment and
+  network — so model-generated code goes to an ACA session pool from either
+  lane.
+
+## Choosing a lane per scenario
+
+The two lanes are not a one-time platform decision. Different DocuSign
+scenarios have different controllability needs, and the same project can run
+both.
+
+```mermaid
+flowchart TB
+  START(["New agent scenario"])
+  Q1{"Does DocuSign need to own the<br/><b>agent harness</b>?<br/><i>custom orchestration · DSPy · custom OTel<br/>own memory loop · non-Python deps</i>"}
+  Q2{"Is the <b>LLM gateway</b> a mandated<br/>governance control point<br/>rather than a convenience?"}
+  Q3{"Is <b>first-response latency</b><br/>user-facing and tight?"}
+
+  PROMPT["<b>Lane A · Prompt agent</b><br/>no cold start · platform-held credentials<br/>gateway enforced by an admin-owned connection<br/><i>accept: no custom code, libraries or metrics in the loop</i>"]
+  HOSTED["<b>Lane B · Hosted agent</b><br/>full harness control · custom telemetry to any backend<br/>DSPy · in-process code · state you own<br/><i>accept: in-VNet CI/CD · per-agent RBAC · ~15 s session start<br/>subnet egress control · your own state store</i>"]
+  MIX["<b>Prompt agent as the governed front door</b><br/>hosted agent behind it as a tool,<br/>or hosted agent on an egress-restricted subnet"]
+  WARM["<b>Hosted agent + warm conversation pool</b><br/>pin conversations, keep them alive with cheap turns<br/><i>there is no platform keep-warm setting</i>"]
+
+  START --> Q1
+  Q1 -->|"No"| PROMPT
+  Q1 -->|"Yes"| Q2
+  Q2 -->|"Yes — must be structurally enforced"| MIX
+  Q2 -->|"No"| Q3
+  Q3 -->|"Yes"| WARM
+  Q3 -->|"No"| HOSTED
+
+  NOTE["<b>Both lanes coexist in one project</b><br/>sharing connections, private endpoints, session pools and Cosmos.<br/>Pick per scenario, not once for the estate."]
+  PROMPT -.- NOTE
+  MIX -.- NOTE
+  WARM -.- NOTE
+  HOSTED -.- NOTE
+
+  classDef a fill:#dae8fc,stroke:#6c8ebf,color:#12315e
+  classDef b fill:#e1d5e7,stroke:#9673a6,color:#4a235a
+  classDef q fill:#fff2cc,stroke:#d6b656,color:#7f6000
+  classDef n fill:#f5f5f5,stroke:#999,color:#333
+  class PROMPT a
+  class HOSTED,WARM,MIX b
+  class Q1,Q2,Q3 q
+  class NOTE,START n
+```
+
+---
+
+## The three original questions, answered
 
 ### 1. Security — VNet setup and reaching internal APIs from the agent service
 
@@ -81,7 +225,7 @@ The ~5 s felt on the first call is **client-side** — credential acquisition pl
 TLS/connection setup. It is fixed in application code by caching the
 credential and reusing one long-lived HTTP client. No Azure change, no cost.
 
-**"Keep agents alive" is the wrong lever.** We tested it directly: explicitly
+**"Keep agents alive" is the wrong lever.** Tested directly: explicitly
 reusing a code-interpreter container gave **no benefit** (median 17.79 s reused
 vs 16.40 s fresh). Warming buys nothing because the sandbox was never the
 bottleneck — the cost is the extra model round-trips to author, execute and
@@ -95,7 +239,7 @@ A/B on the same account, forced code execution:
 | Global Standard | 15–30 s | **173.9 s** |
 | **Provisioned (15 PTU)** | **8.8–9.5 s** | **20.9–29.9 s** |
 
-Caveats we recorded honestly: PTU **narrows but does not flatten** the
+Caveats: PTU **narrows but does not flatten** the
 distribution (one PTU call still took 29.9 s), a fresh PTU deployment returns
 `400 Bad request for dependent service` for roughly its first two minutes, and
 it costs **$1.00/PTU/hour** Global (~$15/hr at the 15-unit minimum).
@@ -125,7 +269,7 @@ Evidence: [`FINDINGS.md`](FINDINGS.md) §1 (§1.6 for PTU)
 > | `PythonLTS` (managed) | Microsoft's Python image | You want isolation and concurrency control, but not custom packages. **MCP works here** |
 > | `CustomContainer` | **Yours, from your registry** | You must pin versions, add private libraries, or prove egress is disabled |
 >
-> "Controlled" in this repo always means **`CustomContainer`** — our image pins
+> "Controlled" in this repo always means **`CustomContainer`** — the image pins
 > `polars`, `pyarrow` and `matplotlib`, and sets `EgressDisabled`.
 
 Same run, same environment:
@@ -143,7 +287,7 @@ provable egress control — which matter more than latency for a compliance stor
 
 **The real design constraint is concurrency, not warmth.** Every distinct session
 identifier holds a slot for the **full cooldown period**. With
-`maxConcurrentSessions: 5` and a 600 s cooldown we reproduced hard `429`s. Size
+`maxConcurrentSessions: 5` and a 600 s cooldown reproduced hard `429`s. Size
 `maxConcurrentSessions` against **arrival rate × cooldown**, reuse one identifier
 per user/conversation, and handle 429 explicitly rather than treating it as a
 slow cold start.
@@ -152,13 +296,14 @@ Evidence: [`FINDINGS.md`](FINDINGS.md) §3
 
 ---
 
-## Requirements 4 to 6 — would hosted agents change any of this?
+## Hosted agents — would they change any of this?
 
-The three requirements above were answered with **prompt agents**. The same
-three — plus later ones on request-context propagation, using an existing
-multi-provider LLM gateway, and a follow-up list covering telemetry, library
-integration and filesystem memory — were then re-run with **hosted agents**
-(own code, LangGraph harness) in the same locked-down account.
+The three questions above were answered with **prompt agents**. Every
+requirement — those three plus request-context propagation, the multi-provider
+LLM gateway, custom telemetry, library integration and filesystem memory — was
+then re-run with **hosted agents** (own code, LangGraph harness) in the same
+locked-down account. Summary below; full detail in
+[`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md).
 
 | | Prompt agent | Hosted agent |
 |---|---|---|
@@ -201,10 +346,13 @@ failed with a 401** from the Memory service to its own model deployment — and
 the identical failure reproduced on a **fully public** project and survived
 three different RBAC grants, so it is not a networking or permissions problem.
 Memory is preview; treat long-term memory as unproven and keep the measured
-fallback of conversation state in the customer's own Cosmos DB. Multi-language execution lives in
-session pools, where the resource provider accepts `PythonLTS`, `NodeLTS`,
-`Shell`, `CsharpLTS`, `GpuBase` and `CustomContainer` — the last two of which
-are undocumented.
+fallback of conversation state in the customer's own Cosmos DB.
+
+**On multi-language support:** the agent runtime itself is Python-only in
+practice. Multi-language execution lives in session pools, where the resource
+provider accepts `PythonLTS`, `NodeLTS`, `Shell`, `CsharpLTS`, `GpuBase` and
+`CustomContainer` — the last two of which are undocumented, and `Shell` gives
+one sandbox with Python, Node, Java and a C compiler.
 
 **The gateway can be the customer's own, and can stay private.** It does not
 have to be Azure API Management or any Azure product — the one measured here is
@@ -218,7 +366,7 @@ operational gotchas: [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)
 
 ---
 
-## The insight that matters most
+## What actually drives latency
 
 **"Keep the agents warm" optimizes the wrong variable.** It is a non-problem. The
 three actual risks are different things with different fixes:
@@ -234,7 +382,7 @@ only measures averages**. A 5–10 s cold-start concern is real but misattribute
 
 ## Platform notes and current limitations
 
-Four behaviours we hit that are **not obvious from the documentation**. None of
+Four behaviours that are **not obvious from the documentation**. None of
 them block the architecture in this repo, but each is worth knowing before you
 design around it — and each has a workaround.
 
@@ -302,8 +450,8 @@ your Microsoft account team before committing a design to it.
   cites "ACA backend response body casing does not match".
 - Conceptual docs disagree on the data plane: `session-pool.md` shows
   `code/execute` with `2024-02-02-preview`, while the TypeSpec and generated REST
-  reference use **`/executions`** with `2025-10-02-preview`. We verified
-  `/execute`, `/code/execute` and `/executions` all work on **every** advertised
+  reference use **`/executions`** with `2025-10-02-preview`. In testing,
+  `/execute`, `/code/execute` and `/executions` all worked on **every** advertised
   api-version, so nothing breaks — but the docs should converge.
 
 ### 3. `readySessionInstances` is silently ignored on PythonLTS pools
@@ -330,8 +478,8 @@ ExpressRoute/VPN to on-premises are supported. No documented limitation says
 otherwise either.
 
 **What to do.** The building blocks strongly suggest this works — the agent
-subnet is an ordinary delegated subnet with no route table restrictions — but we
-did not measure it, so treat it as **unverified**. If your internal APIs are
+subnet is an ordinary delegated subnet with no route table restrictions — but it
+was not measured here, so treat it as **unverified**. If your internal APIs are
 on-premises or in a peered network, prove it with a spike before committing:
 deploy the stub API in this repo on the far side of the link and run the same
 test. Confirm supportability with your Microsoft account team.
@@ -347,8 +495,8 @@ it.
 | File | Contents |
 |---|---|
 | [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) | **Standalone reusable guideline** — secure networking, internal/on-premises API access, latency, code execution. No environment specifics; safe to share as-is |
-| [`FINDINGS.md`](FINDINGS.md) | All measured evidence: cold start and PTU (§1), private networking (§2), code execution and multi-language pools (§3), LLM gateway (§4), how to reproduce (§5) |
-| [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) | All six requirements re-measured with **hosted agents** (LangGraph): comparison per requirement, request-context propagation, multi-provider LLM gateway, capability matrix, operational gotchas |
+| [`FINDINGS.md`](FINDINGS.md) | **Prompt-agent evidence.** Cold start and PTU (§1), private networking and request context (§2), code execution and multi-language pools (§3), LLM gateway (§4), how to reproduce (§5) |
+| [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) | **The requirement-by-requirement deliverable.** Every stated requirement re-measured with **hosted agents** (LangGraph) against prompt agents: security, cold start, code execution, context propagation, LLM gateway, telemetry, DSPy, multi-language, memory, IP protection — plus a capability matrix and 26 operational gotchas |
 | [`VALIDATION.md`](VALIDATION.md) | Independent re-validation: SDK/API version audit, the two corrected conclusions, PTU measurement |
 | [`DEMO-RUNBOOK.md`](DEMO-RUNBOOK.md) | 60-minute session: agenda, commands, talking points, failure responses |
 | `track-b/`, `track-c/` | Deployment templates, stub API, and demo runners |

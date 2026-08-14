@@ -4,13 +4,17 @@ Consolidated evidence from a hands-on POC that deployed a network-isolated
 Foundry Agent Service environment and measured its behaviour.
 
 - **Measured:** August 2026
-- **Environment:** two regions, `gpt-4.1`, Standard Agent Setup with network injection
+- **Environment:** two regions, `gpt-4.1` / `gpt-4o-mini` / `grok-4-1-fast`, Standard Agent Setup with network injection
 - Everything below was **measured live in Azure**, not sourced from documentation.
 
-> **This file is evidence, not guidance.** For the reusable recommendations
-> derived from it, see [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md).
-> For how these conclusions were independently re-tested, see
-> [`VALIDATION.md`](VALIDATION.md).
+> **This file is evidence, not guidance**, and it covers **prompt agents**.
+> - Reusable recommendations derived from it:
+>   [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md)
+> - The same requirements re-measured with **hosted agents**, plus the
+>   requirement-by-requirement comparison:
+>   [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)
+> - How these conclusions were independently re-tested:
+>   [`VALIDATION.md`](VALIDATION.md)
 
 **Redaction.** Subscription IDs, tenant details and resource names are replaced
 with placeholders such as `<foundry-account>` and `<subscription-id>`. Log output
@@ -730,12 +734,7 @@ engineer's laptop, every test driven from inside the VNet — and Foundry reache
 it regardless. Provider credentials held by the gateway never need public
 exposure.
 
-## 4.6 Four traps, each of which cost a debugging cycle
-
-**BYOM does not exist on the legacy `/assistants` API.** There,
-`<connection>/<model>` fails with `invalid_engine_error` exactly like a bogus
-model name. It works only via `agents.create_version(PromptAgentDefinition(...))`
-plus `responses.create()` with an `agent_reference`.
+## 4.6 Three traps
 
 **Foundry always requests streaming.** Every request carried:
 
