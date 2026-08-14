@@ -29,19 +29,42 @@ data from a stub API.
 
 ---
 
+## Requirement map
+
+DocuSign's stated requirements, and where each is answered.
+
+| Requirement (as stated) | Section | Short answer |
+|---|---|---|
+| Security — VNet setup and reaching internal DocuSign APIs | [§2](#2-security--vnet-isolation-and-internal-api-access) | Both agent types work privately; hosted needs an explicit RBAC grant |
+| Cold start — can main agents be kept alive? | [§3](#3-cold-start-and-keeping-agents-warm) | No issue for prompt agents; hosted pays ~15 s per session, no keep-warm knob |
+| Code execution — patterns other tenants use with Container Apps | [§4](#4-code-execution), [§9](#9-multi-language-support) | ACA session pools for untrusted code; in-process only for code you shipped |
+| Agent execution & control — control over the agent harness | [§14](#14-choosing-between-them) | This *is* the hosted-vs-prompt choice; hosted gives full harness control |
+| LLM gateway — use our existing gateway | [§6](#6-llm-gateway--using-an-existing-multi-provider-gateway) | Yes, and it can be your own non-Azure gateway; it must speak SSE |
+| Telemetry & metrics — inject DocuSign custom telemetry | [§7](#7-telemetry-and-metrics) | Hosted only for injection, including to a non-Azure backend; both correlate on trace id |
+| IP protection — data, memory and session state | [§11](#11-ip-protection--where-docusign-data-sits) | Customer-owned stores; two gaps to raise (abuse monitoring, hosted source code) |
+| Library integration — DSPy and similar | [§8](#8-library-integration--dspy-and-arbitrary-packages) | Hosted only; DSPy 3.3.0 ran a real program in the sandbox |
+| Short/long-term memory via filesystem | [§10](#10-memory-filesystem-and-state) | Filesystem is conversation-scoped; long-term needs Foundry Memory or your own store |
+| Request context & identity propagation (raised on the call) | [§5](#5-request-context-and-identity-propagation) | Both propagate context; **neither offers generic OBO** |
+
+---
+
 ## Contents
 
 1. [Executive summary](#1-executive-summary)
-2. [Requirement 1 — VNet isolation and internal API access](#2-requirement-1--vnet-isolation-and-internal-api-access)
-3. [Requirement 2 — cold start](#3-requirement-2--cold-start)
-4. [Requirement 3 — code execution](#4-requirement-3--code-execution)
-5. [Requirement 4 — request context propagation and OBO](#5-requirement-4--request-context-propagation-and-obo)
-6. [Requirement 5 — using an existing multi-provider LLM gateway](#6-requirement-5--using-an-existing-multi-provider-llm-gateway)
-7. [Requirement 6 — platform capabilities](#7-requirement-6--platform-capabilities)
-8. [Capability matrix](#8-capability-matrix)
-9. [Operational gotchas found the hard way](#9-operational-gotchas-found-the-hard-way)
-10. [Choosing between them](#10-choosing-between-them)
-11. [Reproducing](#11-reproducing)
+2. [Security — VNet isolation and internal API access](#2-security--vnet-isolation-and-internal-api-access)
+3. [Cold start and keeping agents warm](#3-cold-start-and-keeping-agents-warm)
+4. [Code execution](#4-code-execution)
+5. [Request context and identity propagation](#5-request-context-and-identity-propagation)
+6. [LLM gateway — using an existing multi-provider gateway](#6-llm-gateway--using-an-existing-multi-provider-gateway)
+7. [Telemetry and metrics](#7-telemetry-and-metrics)
+8. [Library integration — DSPy and arbitrary packages](#8-library-integration--dspy-and-arbitrary-packages)
+9. [Multi-language support](#9-multi-language-support)
+10. [Memory, filesystem and state](#10-memory-filesystem-and-state)
+11. [IP protection — where DocuSign data sits](#11-ip-protection--where-docusign-data-sits)
+12. [Capability matrix](#12-capability-matrix)
+13. [Operational gotchas](#13-operational-gotchas)
+14. [Choosing between them](#14-choosing-between-them)
+15. [Reproducing](#15-reproducing)
 
 ---
 
@@ -54,7 +77,7 @@ change an architecture review — and two of them point in opposite directions.
 | Requirement | Prompt agent | Hosted agent | Verdict |
 |---|---|---|---|
 | **1. VNet + internal APIs** | Managed runtime calls the API; connection secret injected by the data proxy | Your code calls the API from its own sandbox; you resolve the secret yourself | Both work. Hosted **needs an explicit RBAC grant** that prompt agents never needed |
-| **2. Cold start** | No measurable idle de-allocation penalty | **~15 s to provision every new session**, plus a slow first serving turn | **Materially worse.** This is the biggest surprise |
+| **2. Cold start** | No measurable idle de-allocation penalty | **~15 s to provision every new session**, plus a slow first serving turn | **Materially worse** for hosted |
 | **3. Code execution** | Delegate to Code Interpreter or an ACA session pool | Run in-process — ~100,000× faster, but **no isolation** | Different trade, not strictly better |
 | **4. Request context propagation** | **`traceparent` + W3C `baggage` reach the tool** (measured); `x-client-*` and `metadata` do not; per-user auth via Toolbox/MCP | **`x-client-*` headers, `metadata` and `traceparent` all measured working** | Hosted is richer, but prompt agents are **not** empty-handed. **Neither offers generic OBO** |
 | **5. Existing LLM gateway** | Needs an admin-created **`ModelGateway` connection**; model is `<connection>/<model>` | Just set `base_url` in your own client | Both work. **Gemini is not in the Azure catalog**, so a gateway is the only route to it |
@@ -88,11 +111,14 @@ change an architecture review — and two of them point in opposite directions.
    capabilities. But enforcing the LLM gateway as a governed control point is
    **prompt-agent-only**, because a hosted agent can point `base_url` anywhere.
    These pull in opposite directions and the resolution is a design decision,
-   not a measurement. §7.7.
+   not a measurement. §14.1.
 
 ---
 
-# 2. Requirement 1 — VNet isolation and internal API access
+# 2. Security — VNet isolation and internal API access
+
+> *Requirement: "the VNet setup and accessing DocuSign internal APIs using the
+> agent service."*
 
 **Both models reach a private, VNet-only internal API. The difference is who
 holds the credential and who must be granted access.**
@@ -121,7 +147,7 @@ TOOL_OUTPUT={'envelope_id': 'env-1001', 'status': 'completed',
 `_credential_source` is emitted by the tool itself, so the evidence is that the
 key came from the project connection — not that the model said so.
 
-## 2.2 Deployment is a data-plane operation — this is the headline
+## 2.2 Deployment is a data-plane operation
 
 Deploying a hosted agent goes through the **project data plane**, not ARM.
 With `publicNetworkAccess=Disabled` this changes CI/CD design:
@@ -192,7 +218,10 @@ nothing.
 
 ---
 
-# 3. Requirement 2 — cold start
+# 3. Cold start and keeping agents warm
+
+> *Requirement: "documentation indicates a 5 to 10-second latency due to agent
+> de-allocation. Is there a way to keep a few main agents always alive?"*
 
 **This is where the two models diverge most, and not in the hosted agent's
 favour.**
@@ -206,7 +235,7 @@ exposes no warm-up control because it needs none, and the code sandbox costs
 Hosted agents introduce a layer prompt agents do not have: **your container,
 started per session.**
 
-## 3.1 Measured
+## 3.1 Measured latencies
 
 | Phase | Measurement | Label |
 |---|---:|---|
@@ -238,7 +267,7 @@ TURN=6 STATUS=200 LATENCY_S=10.77
 Turns 1–3 each landed on a fresh session (see §3.3). From turn 4 the
 conversation was pinned and latency settled into single digits.
 
-## 3.3 Every unpinned request mints a new session — and pays for it
+## 3.3 Every unpinned request mints a new session
 
 On the Responses protocol, a POST that does not continue an existing
 conversation **creates a new agent session**. Sessions then linger (`IDLE`, with
@@ -253,8 +282,8 @@ Two consequences:
 Continuation on the Responses protocol uses **`previous_response_id`** (or
 `conversation.id`). The `agent_session_id` query parameter belongs to the
 **Invocations** protocol; passing it to a Responses endpoint made requests hang
-until the client timed out **[Measured]**. This cost real debugging time and is
-not obvious from the samples, which show both protocols side by side.
+until the client timed out **[Measured]**. The samples show both protocols side
+by side, which makes this easy to get wrong.
 
 ## 3.4 Answering "can we keep a few main agents always alive?"
 
@@ -278,7 +307,10 @@ work the prompt-agent model does not require.
 
 ---
 
-# 4. Requirement 3 — code execution
+# 4. Code execution
+
+> *Requirement: "code execution … and patterns other tenants are using for
+> Azure Container Apps in this space."*
 
 ## 4.1 Measured comparison
 
@@ -298,7 +330,7 @@ the agent is already a process.
  'stdout': '333833500\n', 'elapsed_ms': 0.15}
 ```
 
-## 4.2 The isolation caveat that decides the pattern
+## 4.2 The isolation caveat
 
 That speed is not free. Probing the execution context from inside the agent
 **[Measured]**:
@@ -333,7 +365,7 @@ they add a fast path that is only appropriate for trusted code.
 
 ---
 
-# 5. Requirement 4 — request context propagation and OBO
+# 5. Request context and identity propagation
 
 > *"Can hosted agents and prompt agents receive, store, and propagate
 > customer-defined request context (identity, tenant, correlation IDs) to
@@ -349,7 +381,7 @@ gives you generic OBO to an arbitrary internal API**: the caller's
 because every one of these channels is caller-asserted, none of them is an
 authorization mechanism — see §5.7 for the distinction that decides the design.
 
-## 5.1 What actually arrives — measured
+## 5.1 What actually arrives
 
 A hosted agent was called with caller-supplied headers, a `metadata` object and
 a W3C `traceparent`. It echoed back everything the platform gave it
@@ -401,7 +433,7 @@ The platform injects two values **[Measured]**:
   Storage, A2A) so those services can resolve caller context server-side. Never
   parse it **[Documented]**.
 
-> **The trap.** In this POC `x-agent-user-id` came back as the object id of the
+> **The trap.** Here, `x-agent-user-id` came back as the object id of the
 > **service identity that made the call**, not a human. If a web tier calls the
 > agent with its own managed identity — the normal enterprise pattern —
 > `x-agent-user-id` identifies **your application**, not the end user. It is not
@@ -438,9 +470,7 @@ storage, refresh and injection.
 
 ### 5.4.1 What reaches a downstream API — measured on the wire
 
-The claim "no mechanism for prompt agents" deserved testing rather than
-repeating, because the alternative for the customer is a redesign. A prompt
-agent was given an OpenAPI tool pointing at an echo API
+A prompt agent was given an OpenAPI tool pointing at an echo API
 (`track-b/context-echo/`) that records every inbound header, then invoked with
 caller-supplied headers, `metadata`, a `traceparent` and a `baggage` header.
 **The API records the wire, so the model cannot flatter the result.**
@@ -465,7 +495,7 @@ is a new child — correct W3C behaviour. So end-to-end correlation from your we
 tier, through the prompt agent, into your internal API works today with no
 custom plumbing.
 
-**`baggage` is the finding that changes the answer.** It is the W3C standard
+**`baggage` is the practical channel.** It is the W3C standard
 carrier for arbitrary key/value request context, and caller-supplied entries
 survive the whole path. Prompt agents therefore *do* have a per-request custom
 context channel — just not the `x-client-*` one hosted agents use.
@@ -539,7 +569,7 @@ Your front door writes authoritative context (real end-user id, tenant,
 entitlements) into a store keyed by `(agent_session_id, x-agent-user-id)` before
 invoking the agent; the agent reads it. Because the agent never trusts a
 caller-asserted value, forgery is not possible. This POC already demonstrated the
-storage half — private-endpoint Cosmos, keyless, ~745 ms write (§8.1).
+storage half — private-endpoint Cosmos, keyless, ~745 ms write (§10.4).
 
 **4. `x-client-*` headers (hosted) or W3C `baggage` (either type) for
 non-authoritative context.**
@@ -660,7 +690,9 @@ itself vouches for the user.
 
 ---
 
-# 6. Requirement 5 — using an existing multi-provider LLM gateway
+# 6. LLM gateway — using an existing multi-provider gateway
+
+> *Requirement: "we need the ability to utilise our existing LLM gateway."*
 
 **The customer's gateway exists to reach several providers — Azure OpenAI and
 Google Gemini were named explicitly — through one governed endpoint.**
@@ -687,7 +719,7 @@ gateway can be **the customer's own**. Prompt agents need an admin-created
 `ModelGateway` connection and a gateway that meets a real technical contract
 (§6.6); hosted agents just set `base_url`.
 
-## 6.2 Gemini is not in the catalog — this is the pivotal fact
+## 6.2 Gemini is not in the Azure catalog
 
 Enumerating every model offered in `eastus2` returns **11 publishers**:
 
@@ -715,7 +747,7 @@ Two deployment frictions worth knowing before planning:
   registration data. Budget for a commercial/legal step, not just an ARM call.
   [Measured]
 
-## 6.3 A prompt agent runs happily on a non-OpenAI model
+## 6.3 Prompt agents on a non-OpenAI model
 
 Deployed `grok-4-1-fast-non-reasoning` and gave a prompt agent a function tool:
 
@@ -753,8 +785,7 @@ Foundry's supported answer is **bring your own model**: an admin registers the
 gateway as a connection, declares which models it exposes, and agents then
 reference them as `<connection-name>/<model-name>`.
 
-To prove it end to end rather than reading about it, this POC deployed a real
-OpenAI-compatible gateway (`track-d/gateway/gateway.py`) as a Container App
+This POC deployed a real OpenAI-compatible gateway (`track-d/gateway/gateway.py`) as a Container App
 **inside the VNet**, routing by model name:
 
 * `gemini-*` → a stub standing in for Google Gemini, representing a provider
@@ -769,19 +800,11 @@ Results, from a v2 prompt agent in the locked-down project:
 | Real Azure OpenAI via gateway | `poc-llm-gateway/gpt-4o-mini` | ✅ returned `GATEWAY_OK` | 6.18 s |
 | Tool calling via gateway | `poc-llm-gateway/gemini-2.5-pro` | ✅ `function_call get_envelope_status` | 0.73 s |
 
-The gateway's own request log is the proof the traffic really transited it —
-not model prose. [Measured]
+The gateway's own request log confirms the traffic transited it. [Measured]
 
-### Four traps that each cost a debugging cycle
+### Three traps
 
-**1. BYOM only exists on the v2 prompt-agent API.**
-On the legacy `/assistants` surface, `<connection>/<model>` fails with
-`invalid_engine_error` exactly like a bogus model name. It works only via
-`agents.create_version(PromptAgentDefinition(...))` plus `responses.create()`
-with an `agent_reference`. If you are still on `/assistants`, BYOM is not
-available to you. [Measured]
-
-**2. Foundry always requests streaming. This is the big one.**
+**1. Foundry always requests streaming — the most costly one to miss.**
 Every request Foundry sent the gateway contained `"stream": true`:
 
 ```json
@@ -797,16 +820,14 @@ The gateway must emit **SSE `chat.completion.chunk` events terminated by
 `stream_options.include_usage` is set. **Verify this before anything else.**
 [Measured]
 
-**3. Connection metadata must be a JSON *string*.**
+**2. Connection metadata must be a JSON *string*.**
 `metadata.models` is a map of string→string. Passing a real JSON array is
 rejected with *"unable to deserialize request body"*; it has to be
-`json.dumps(...)` into a string.
+`json.dumps(...)` into a string. Connection creation can also return
+`InternalServerError` several times in a row with an unchanged payload —
+**retry before assuming the payload is wrong.** [Measured]
 
-Connection creation also returned `InternalServerError` on three consecutive
-attempts before succeeding on the fourth, with an identical payload. **Retry
-before believing the payload is wrong.** [Measured]
-
-**4. Container Apps has no IMDS.**
+**3. Container Apps has no IMDS.**
 The gateway's managed-identity call to `169.254.169.254` was refused instantly.
 ACA injects `IDENTITY_ENDPOINT` / `IDENTITY_HEADER` instead. It presents as a
 fast `502` that looks like a network policy problem and is not. [Measured]
@@ -862,7 +883,7 @@ The connection that worked:
 | 8 | Be reachable from the Foundry project — **private is fine, see below** | [Measured] |
 | 9 | Return HTTP 200 with an SSE body; non-2xx is retried 3× then surfaces as an opaque 500 | [Measured] |
 
-Requirement 2 is the one that will cost a day. A gateway that answers with a
+Requirement 2 is the most common failure. A gateway that answers with a
 perfectly valid **non-streaming** OpenAI JSON body is not "slightly wrong" —
 it fails, silently and unhelpfully, as described in §6.5.
 
@@ -935,7 +956,7 @@ Also note the data-residency point: a gateway that reaches a non-Azure provider
 moves prompt content outside the Azure compliance boundary. For a customer
 whose driver is data isolation, that deserves an explicit decision. [Documented]
 
-## 6.9 Native alternative worth considering first
+## 6.9 Native alternative — Model Router
 
 Foundry's **Model Router** now spans OpenAI, Anthropic, Meta, DeepSeek and xAI,
 selects per request with tool-awareness, and provides automatic failover.
@@ -962,38 +983,12 @@ uninformative `500`.
 
 ---
 
-# 7. Requirement 6 — platform capabilities
+# 7. Telemetry and metrics
 
-The follow-up list restated three requirements already answered above and added
-three new ones. Coverage first, so nothing is re-litigated:
+> *Requirement: "the platform must support the injection of DocuSign custom
+> telemetry and metrics."*
 
-| Requirement | Status |
-|---|---|
-| Agent execution & control | Answered — §2–§6 and §10; this *is* the hosted-vs-prompt distinction |
-| LLM gateway | Answered — §6 |
-| Code execution | Answered — §4, extended below with **multi-language** |
-| **Telemetry & metrics injection** | **New — measured below** |
-| **Library integration (DSPy)** | **New — measured below** |
-| **Filesystem access for short/long-term memory** | **New — measured below** |
-| IP protection | Partly answered — §2; consolidated below |
-
-## 7.1 Result
-
-| Question | Prompt agent | Hosted agent | Label |
-|---|---|---|---|
-| Emit **custom OTel spans** with customer dimensions | From the *calling app* only | **Yes, from inside the agent** | [Measured] |
-| Emit **custom OTel metrics** | No — Microsoft owns the loop | **Yes** | [Measured] |
-| Export telemetry to a **non-Azure** backend (Datadog, OTLP) | No | **Yes — measured against a third-party OTLP sink** | [Measured] |
-| Install an arbitrary PyPI library (DSPy) | No | **Yes — DSPy 3.3.0 ran** | [Measured] |
-| Run **non-Python** code | Via session pools | Via session pools | [Measured] |
-| Writable filesystem in the agent runtime | n/a | **Yes, 4.1 GB** | [Measured] |
-| Filesystem as **short-term** memory | n/a | **Yes, per conversation** | [Measured] |
-| Filesystem as **long-term** memory | n/a | **No — needs an external store** | [Measured] |
-| Create a **Foundry Memory** store from inside the VNet | Yes, 1.08 s | Yes | [Measured] |
-| **Ingest** into a memory store | **Failed — 401 to the model** | Same | [Measured] |
-| Cross-conversation recall via Foundry Memory | Not reached | Not reached | [Unknown] |
-
-## 7.2 Telemetry — the sharpest split in the whole comparison
+## 7.1 Hosted agents — custom spans and metrics
 
 A hosted agent emitted a customer-defined span **and** customer-defined metrics
 carrying DocuSign's own dimensions, and both were queried back out of
@@ -1017,9 +1012,9 @@ Two useful details about the sandbox:
   too. [Measured]
 * Hosted agents can additionally export to a **non-Microsoft** backend over
   OTLP/HTTP. This was measured, not assumed, because DocuSign does not use
-  Azure Monitor — see §7.2.1. [Measured]
+  Azure Monitor — see §7.1. [Measured]
 
-### 7.2.1 Exporting to a non-Azure backend — measured
+## 7.2 Exporting to a non-Azure backend
 
 A stdlib-only OTLP/HTTP receiver (`track-d/otlp-sink/`) was deployed to the
 same VNet to stand in for Datadog / Splunk / a self-hosted collector. The agent
@@ -1044,7 +1039,7 @@ Two findings worth raising on the call:
   redirects the *platform's* instrumentation as well as the customer's, so
   DocuSign gets the full agent trace — including model calls it did not
   instrument — in its own backend. It also means endpoint URLs leave Azure, so
-  the sink must be treated as in-scope for the IP-protection review (§7.7).
+  the sink must be treated as in-scope for the IP-protection review (§11).
   [Measured]
 * **Egress is unrestricted**, consistent with §2.4: the sandbox reached the
   sink directly. A public Datadog endpoint would work the same way; nothing
@@ -1054,13 +1049,11 @@ Nothing about this is Azure-specific — the sink is ~90 lines of Python with no
 dependencies, and the exporter is the stock `opentelemetry-exporter-otlp-proto-http`
 package added to the agent's `requirements.txt`.
 
+## 7.3 Prompt agents
 
-### 7.2.2 Prompt agents — measured, not assumed
-
-This was previously recorded as "no documented way", which is a statement about
-documentation rather than behaviour. It has now been tested: a prompt agent was
-invoked with `metadata`, `x-client-*` headers, a `traceparent` and a `baggage`
-header, and the resulting traces were read back out of App Insights.
+A prompt agent was invoked with `metadata`, `x-client-*` headers, a
+`traceparent` and a `baggage` header, and the resulting traces were read back
+out of Application Insights.
 
 **The good news — correlation is solved.** Foundry's server spans carried
 `operation_Id = 11112222333344445555666677778888`, which is **byte-identical to
@@ -1102,21 +1095,26 @@ emitted from inside a prompt-agent run.** [Measured]
 > ⚠️ **IP-protection note.** `gen_ai.input.messages` and `gen_ai.output.messages`
 > contain the **full prompt and completion text**, including system
 > instructions. In this configuration DocuSign's prompts — which they consider
-> IP (§7.7) — are written to Application Insights. Confirm content-capture
+> IP (§11) — are written to Application Insights. Confirm content-capture
 > settings before enabling tracing in production. [Measured]
 
 **Reaching a non-Azure backend.** The project's tracing target is an
 Application Insights connection, so prompt-agent telemetry lands in Azure Monitor
 first. Getting it to Datadog or Splunk means an export hop — diagnostic settings
 to Event Hub, then a forwarder — rather than the direct OTLP exporter a hosted
-agent can use (§7.2.1). [Documented]
+agent can use (§7.1). [Documented]
 
 > If "inject DocuSign telemetry and metrics" means *from inside the agent*,
 > that is a hosted-agent capability. Prompt agents give you Microsoft's
 > telemetry, correctly correlated to your trace id, plus whatever your own
 > services record at the tool boundary.
 
-## 7.3 DSPy and arbitrary libraries
+---
+
+# 8. Library integration — DSPy and arbitrary packages
+
+> *Requirement: "the ability to integrate prompt optimisation libraries such
+> as DSPy."*
 
 `dspy-ai` was added to `requirements.txt`, deployed, and then *executed* — the
 test deliberately runs a real DSPy program rather than only importing it:
@@ -1142,7 +1140,9 @@ because there is no customer process. The escape hatch is to run the library in
 a session pool or an Azure Function and expose it as a tool — which means DSPy
 would optimise prompts *outside* the agent and hand results in.
 
-## 7.4 Multi-language execution
+---
+
+# 9. Multi-language support
 
 The agent runtime and the code sandbox are different questions, and the answers
 differ.
@@ -1190,7 +1190,13 @@ arbitrary shell commands.
 
 Foundry's built-in Code Interpreter tool remains **Python-only**. [Documented]
 
-## 7.5 Filesystem, and what "memory" really means
+---
+
+# 10. Memory, filesystem and state
+
+> *Requirement: "short/long-term memory via filesystem access."*
+
+## 10.1 Filesystem, and what "memory" really means
 
 The hosted sandbox has a writable disk:
 
@@ -1215,7 +1221,7 @@ So the filesystem is **conversation-scoped**. [Measured]
   persists, and the warm turn is also less than half the latency.
 * **Long-term memory via filesystem: no.** A new conversation gets a new
   sandbox and an empty disk. Anything that must outlive a conversation belongs
-  in a store — Cosmos DB, Azure Storage or Foundry Memory (§7.6).
+  in a store — Cosmos DB, Azure Storage or Foundry Memory (§14.2).
 
 Microsoft documents session storage as surviving the 15-minute idle timeout and
 being deleted after **30 days of inactivity**, with up to 20 GiB at 1 vCPU or
@@ -1223,12 +1229,11 @@ larger. Treat it as a durable cache keyed by conversation, not a system of
 record. There is **no documented Azure Files or persistent-volume mount**.
 [Documented / Not documented]
 
-## 7.6 Foundry Memory — the intended long-term answer, and what it did
+## 10.2 Foundry Memory
 
-"No long-term memory" above is a statement about the **filesystem**, not about
-the platform. Foundry Memory is the managed long-term memory service, and it is
-the right architectural answer to the requirement. It was tested rather than
-assumed, and the result is mixed.
+"No long-term memory" above refers to the **filesystem**, not to the platform.
+Foundry Memory is the managed long-term memory service and the architectural
+answer to the requirement. The result is mixed.
 
 **What worked.** A memory store was created successfully **from inside the
 locked-down VNet**, in 1.08 s:
@@ -1253,8 +1258,7 @@ ResourceError: Provided Azure resource encountered an error.
 ```
 
 The Memory service could not authenticate to the model deployment it had been
-configured with. Because that error is easy to misattribute, three hypotheses
-were tested and **all three were disproved**:
+configured with. Three likely causes were each ruled out:
 
 | Hypothesis | Test | Result |
 |---|---|---|
@@ -1279,17 +1283,17 @@ everyone. But it does mean:
   plan the fallback.
 * The fallback is well-trodden and already proven in this POC: **conversation
   state in the customer's own Cosmos DB**, measured at 745 ms write / 938 ms
-  read over a private endpoint (§8.1). That also keeps memory inside DocuSign's
-  subscription, which suits the IP-protection requirement in §7.7 better than a
+  read over a private endpoint (§10.4). That also keeps memory inside DocuSign's
+  subscription, which suits the IP-protection requirement in §11 better than a
   managed store does.
 
-Two SDK details that cost time, if anyone reproduces this: the model fields are
+Two SDK details worth noting: the model fields are
 `chat_model` / `embedding_model` on `MemoryStoreDefaultDefinition` (not
 `*_deployment_name` on the options object), and memory items need an explicit
 `"type": "message"` or ingestion fails with *"Failed to parse item with
 unknown/missing type"*. [Measured]
 
-### 7.6.1 Can a *hosted* agent use Foundry Memory the way a prompt agent does?
+## 10.3 Can a hosted agent use Foundry Memory?
 
 Short answer: **it can reach the service, but it does not get the declarative
 binding.** The two halves are worth separating.
@@ -1347,12 +1351,36 @@ fail quickly. [Measured]
   either.
 * A hosted agent must **own the memory loop** — search at turn start, write back
   at turn end, from its own code. That is more work, and it is also the option
-  that lets DocuSign choose the store, which is what the IP requirement (§7.7)
+  that lets DocuSign choose the store, which is what the IP requirement (§11)
   actually wants.
 * Given the ingestion failure, the Cosmos-backed pattern already measured in
-  §8.1 remains the recommendation for hosted agents until Memory leaves preview.
+  §10.4 remains the recommendation for hosted agents until Memory leaves preview.
 
-## 7.7 IP protection — where DocuSign data actually sits
+## 10.4 Agent state, over the private endpoint
+
+The hosted agent wrote and read its own state in a Cosmos account with
+`publicNetworkAccess=Disabled`, `disableLocalAuth=true`, using **its own managed
+identity** (`Cosmos DB Built-in Data Contributor`), with no keys anywhere:
+
+```text
+{'persisted': true, 'auth': 'managed_identity_aad',
+ 'endpoint_host': '<cosmos-account>.documents.azure.com:443', 'elapsed_ms': 744.96}
+{'count': 1, 'items': [{'note': 'sum of squares computed', ...}],
+ 'auth': 'managed_identity_aad', 'elapsed_ms': 938.15}
+```
+
+This is the pattern to recommend: **explicit persistence you control**, rather
+than relying on the undocumented mapping between hosted agents and the
+Foundry-managed BYO thread store.
+
+---
+
+---
+
+# 11. IP protection — where DocuSign data sits
+
+> *Requirement: "protecting DocuSign IP, including data, memory and session
+> state."*
 
 Mostly a consolidation of §2 plus Microsoft's published commitments.
 
@@ -1360,7 +1388,7 @@ Mostly a consolidation of §2 plus Microsoft's published commitments.
 |---|---|---|
 | Prompts & completions | Not used to train foundation models; not shared with model providers | [Documented] |
 | Threads, messages, files, vector stores | **Customer's own** Cosmos DB, Storage and AI Search under Standard Agent Setup | [Documented] |
-| Agent state (this POC) | Customer Cosmos DB, reached over a private endpoint | [Measured, §8.1] |
+| Agent state (this POC) | Customer Cosmos DB, reached over a private endpoint | [Measured, §10.4] |
 | Network path | No public egress required; internal APIs reached privately | [Measured, §2] |
 | Encryption | AES-256 at rest, optional CMK — **preview features may not support CMK** | [Documented] |
 | Hosted agent **source code** | Uploaded as a ZIP; **physical store, retention and CMK support are not documented** | [Not documented] |
@@ -1385,21 +1413,9 @@ Two items worth raising on the call rather than burying:
   safer answer, because the image stays in DocuSign's own registry and Foundry
   pulls it. [Not documented / Documented]
 
-## 7.8 Recommendation for these three new requirements
+---
 
-Custom telemetry *from inside the agent*, DSPy, and filesystem working memory
-are **all hosted-agent capabilities and none of them are prompt-agent
-capabilities**. The one qualification is correlation: prompt-agent spans do
-carry the caller's trace id, so DocuSign's telemetry joins Microsoft's even
-though DocuSign cannot add fields to it (§7.2.2). Combined with §6, where the gateway argument ran the other way,
-the honest summary is that these requirements pull in opposite directions:
-
-* Telemetry, DSPy and filesystem memory → **hosted agents**.
-* Enforcing the LLM gateway as a control point → **prompt agents**.
-
-That tension is the real decision, and §10 covers it.
-
-# 8. Capability matrix
+# 12. Capability matrix
 
 | Capability | Prompt agent | Hosted agent | Label |
 |---|---|---|---|
@@ -1454,28 +1470,11 @@ That tension is the real decision, and §10 covers it.
 | **Where hosted agent source code is stored** | n/a | **Not documented** — use BYO image if code is IP | [Unknown] |
 | **Generic OBO to an arbitrary internal API** | No | No — needs a broker | [Documented] |
 
-## 8.1 State — measured, over the private endpoint
-
-The hosted agent wrote and read its own state in a Cosmos account with
-`publicNetworkAccess=Disabled`, `disableLocalAuth=true`, using **its own managed
-identity** (`Cosmos DB Built-in Data Contributor`), with no keys anywhere:
-
-```text
-{'persisted': true, 'auth': 'managed_identity_aad',
- 'endpoint_host': '<cosmos-account>.documents.azure.com:443', 'elapsed_ms': 744.96}
-{'count': 1, 'items': [{'note': 'sum of squares computed', ...}],
- 'auth': 'managed_identity_aad', 'elapsed_ms': 938.15}
-```
-
-This is the pattern to recommend: **explicit persistence you control**, rather
-than relying on the undocumented mapping between hosted agents and the
-Foundry-managed BYO thread store.
-
 ---
 
-# 9. Operational gotchas found the hard way
+# 13. Operational gotchas
 
-Each of these cost real time and none is obvious from the documentation.
+None of these is obvious from the documentation.
 
 | # | Gotcha | Symptom | Fix |
 |---|---|---|---|
@@ -1492,29 +1491,24 @@ Each of these cost real time and none is obvious from the documentation.
 | 11 | SDK logs a full traceback per empty 204 | Floods `--tail`, pushes real errors out | Silence the `azure` logger |
 | 12 | `az` active subscription is global mutable state | `ResourceGroupNotFound` for resources that exist | Pin `--subscription` on every call |
 
-Requirement 5 added five more **[Measured]**:
+Further gotchas, all **[Measured]**:
 
 | # | Gotcha | Symptom |
 |---|---|---|
 | 13 | Foundry's BYOM path **always** sends `"stream": true` | A valid non-streaming gateway reply → 3 silent retries → opaque `500 server_error` |
 | 14 | Agent creation never validates `model` | Bogus model or URL returns `200`; fails only at run with `invalid_engine_error` |
-| 15 | BYOM does not exist on the legacy `/assistants` API | `<conn>/<model>` fails identically to a typo |
-| 16 | Connection `metadata` is string→string | A nested JSON array → *"unable to deserialize request body"*; must be `json.dumps`'d |
-| 17 | Container Apps has no IMDS | `169.254.169.254` refused instantly; use `IDENTITY_ENDPOINT` + `X-IDENTITY-HEADER` |
-| 18 | `/app` is read-only in the hosted sandbox | Writing next to your code fails with `Errno 30`; use `/home/session` |
-| 19 | Filesystem state silently disappears between conversations | Chained turns share a sandbox, so local testing looks persistent; a new conversation gets an empty disk |
-| 20 | `Shell` session pools reject `code` / `codeInputType` | Use `shellCommand`; older API versions report *"not supported in API version 2023-08-01-preview"* even when you asked for a newer one |
-| 21 | `CsharpLTS` and `GpuBase` pool types exist but are undocumented | `CsharpLTS` is not enabled in `eastus2`; discover availability by asking the RP, not the docs |
-| 22 | Foundry Memory ingestion returned `401` to its own model deployment | Reproduced on a **public** project too, so it is not the VNet; survived three RBAC grants |
-| 23 | Memory items need an explicit `"type": "message"` | Plain `role`/`content` fails with *"Failed to parse item with unknown/missing type"* |
-| 24 | Memory model fields are `chat_model` / `embedding_model` | Not `*_deployment_name` on the options object, which raises `TypeError` |
-| 25 | `HostedAgentDefinition.memory` is container **RAM**, not Foundry Memory | Reads like a memory-service binding; it takes `1Gi`. The memory service attaches as the `memory_search_preview` *tool*, which hosted agents cannot take |
-| 26 | Oversized W3C `baggage` entries are **silently dropped** | ~2 KB arrives intact; at ~8 KB the large entry vanishes with no error while small ones survive — alert on absence, never assume delivery |
-| 27 | A new agent version does **not** evict warm sandboxes | The first invoke after publishing `:3` ran `:2`'s code; re-invoke until the reported instance id changes, or you will measure the old build |
-
-Connection creation also returned `InternalServerError` three times in a row
-before succeeding on the fourth with an unchanged payload — **retry before
-debugging the payload**.
+| 15 | Connection `metadata` is string→string | A nested JSON array → *"unable to deserialize request body"*; must be `json.dumps`'d |
+| 16 | Container Apps has no IMDS | `169.254.169.254` refused instantly; use `IDENTITY_ENDPOINT` + `X-IDENTITY-HEADER` |
+| 17 | `/app` is read-only in the hosted sandbox | Writing next to your code fails with `Errno 30`; use `/home/session` |
+| 18 | Filesystem state silently disappears between conversations | Chained turns share a sandbox, so local testing looks persistent; a new conversation gets an empty disk |
+| 19 | `Shell` session pools reject `code` / `codeInputType` | Use `shellCommand`; older API versions report *"not supported in API version 2023-08-01-preview"* even when you asked for a newer one |
+| 20 | `CsharpLTS` and `GpuBase` pool types exist but are undocumented | `CsharpLTS` is not enabled in `eastus2`; discover availability by asking the RP, not the docs |
+| 21 | Foundry Memory ingestion returned `401` to its own model deployment | Reproduced on a **public** project too, so it is not the VNet; survived three RBAC grants |
+| 22 | Memory items need an explicit `"type": "message"` | Plain `role`/`content` fails with *"Failed to parse item with unknown/missing type"* |
+| 23 | Memory model fields are `chat_model` / `embedding_model` | Not `*_deployment_name` on the options object, which raises `TypeError` |
+| 24 | `HostedAgentDefinition.memory` is container **RAM**, not Foundry Memory | Reads like a memory-service binding; it takes `1Gi`. The memory service attaches as the `memory_search_preview` *tool*, which hosted agents cannot take |
+| 25 | Oversized W3C `baggage` entries are **silently dropped** | ~2 KB arrives intact; at ~8 KB the large entry vanishes with no error while small ones survive — alert on absence, never assume delivery |
+| 26 | A new agent version does **not** evict warm sandboxes | The first invoke after publishing `:3` ran `:2`'s code; re-invoke until the reported instance id changes, or you will measure the old build |
 
 SDK shapes that differ from the obvious guess **[Measured]**:
 
@@ -1529,11 +1523,27 @@ connections.get(name, include_credentials=True)
 
 ---
 
-# 10. Choosing between them
+# 14. Choosing between them
+
+## 14.1 The requirements pull in opposite directions
+
+Custom telemetry from inside the agent, DSPy and filesystem working memory are
+**hosted-agent capabilities and not prompt-agent capabilities**. The one
+qualification is correlation: prompt-agent spans do carry the caller's trace id,
+so DocuSign's telemetry joins Microsoft's even though DocuSign cannot add fields
+to it (§7.3). Enforcing the LLM gateway as a governed control point runs the
+other way (§6) — a hosted agent can point `base_url` anywhere.
+
+* Telemetry, DSPy and filesystem memory → **hosted agents**.
+* Enforcing the LLM gateway as a control point → **prompt agents**.
+
+Resolving that tension is the design decision.
+
+## 14.2 Guidance
 
 **Prefer prompt agents when** the requirement is a governed, network-isolated
 agent calling internal APIs and running code in a provable sandbox. Everything
-in requirement 1 and 3 is achievable with less to build, no cold start, no agent
+in §2 and §4 is achievable with less to build, no cold start, no agent
 identity to provision, and credential handling delegated to the platform.
 
 **Prefer hosted agents when** you need control the prompt-agent model does not
@@ -1561,7 +1571,9 @@ harness.
 
 ---
 
-# 11. Reproducing
+---
+
+# 15. Reproducing
 
 Everything runs through one script, because the data plane is unreachable from
 outside the VNet:

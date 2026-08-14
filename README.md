@@ -213,7 +213,7 @@ resolved to a **private IP** inside the VNet, unreachable from the public
 internet, and Foundry reached it regardless. The full endpoint contract is in
 [`FINDINGS.md`](FINDINGS.md) §4.5.
 
-Full requirement-by-requirement comparison, capability matrix and the twenty-seven
+Full requirement-by-requirement comparison, capability matrix and the twenty-six
 operational gotchas: [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)
 
 ---
