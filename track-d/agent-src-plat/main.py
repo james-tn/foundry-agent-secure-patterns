@@ -318,16 +318,20 @@ def probe_memory(
 ) -> str:
     """Call the Foundry Memory service directly from inside the hosted sandbox.
 
-    Hosted agents get no declarative memory binding - the memory_search_preview
-    tool attaches to a prompt agent definition, which a hosted agent does not
-    have. So the only route is to be an ordinary client of the memory API using
-    the sandbox's own identity. This measures whether that route works.
+    Prompt agents use a declarative memory_search_preview tool. Hosted agents
+    integrate memory in their application code: Microsoft Agent Framework
+    provides FoundryMemoryProvider, while this LangGraph probe exercises the
+    equivalent low-level Memory Store API with the sandbox's runtime identity.
     """
     out = {"scope": scope, "store": os.environ.get("MEMORY_STORE", "poc-longterm-memory")}
     try:
         from azure.ai.projects import AIProjectClient
 
-        client = AIProjectClient(endpoint=PROJECT_ENDPOINT, credential=_credential)
+        client = AIProjectClient(
+            endpoint=PROJECT_ENDPOINT,
+            credential=_credential,
+            allow_preview=True,
+        )
         memory = client.beta.memory_stores
 
         started = time.time()
@@ -346,8 +350,8 @@ def probe_memory(
         out["hits"] = len(items)
         out["recalled"] = [str(getattr(i, "content", i))[:160] for i in items[:3]]
 
-        # Ingestion previously failed 401 when called from a job identity; retry
-        # here because the sandbox identity is a different principal.
+        # Writes require Foundry User and Cognitive Services OpenAI User on the
+        # actual runtime identity at the Foundry project scope.
         if os.environ.get("MEMORY_TRY_INGEST") == "1":
             started = time.time()
             try:

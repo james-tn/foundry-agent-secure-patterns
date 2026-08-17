@@ -1,533 +1,201 @@
-# Azure AI Foundry Agent Service — POC findings
+# Azure AI Foundry Agent Service — enterprise POC
 
-A hands-on POC that deployed a network-isolated Foundry Agent Service
-environment and **measured its real behaviour live in Azure**, rather than
-sourcing answers from documentation.
+A hands-on evaluation of **prompt agents** and **hosted agents** against common
+enterprise requirements: private API access, cold start, code execution,
+request context, LLM gateways, telemetry, library integration, memory and IP
+protection.
 
-It started with three questions that come up in nearly every enterprise
-evaluation — private API access, cold start, and code execution — and was then
-extended to a fuller enterprise requirement list: request-context propagation,
-an existing multi-provider LLM gateway, custom telemetry, library integration,
-memory and IP protection. Each requirement was answered twice: once with
-**prompt agents** (configuration, Foundry-managed runtime) and once with
-**hosted agents** (your own LangGraph code in a managed sandbox).
+- **Measured:** August 2026
+- **Environment:** Standard Agent Setup, network injection,
+  `publicNetworkAccess=Disabled`, two Azure regions
+- **Evidence labels:** **[Measured]** = observed live; **[Documented]** =
+  supported by current product documentation; **[Unknown]** = not established
 
-- Built **2026-08-04 → 08-05** · re-validated **08-06** · hosted agents **08-12 → 08-14**
-- Two regions, Standard Agent Setup with network injection, `publicNetworkAccess=Disabled`
-- Claims are labelled by evidence: **[Measured]** / **[Documented]** /
-  **[Unknown]** in the findings documents, and **[Verified]** / **[Documented]** /
-  **[Inferred]** in the standalone guideline
-
-> An independent re-validation pass **overturned two conclusions** from the
-> first run. Both corrections are recorded in
-> [`VALIDATION.md`](VALIDATION.md) rather than quietly applied.
-
----
+Figures come from one environment and are not an SLA. Account, project,
+subscription and customer names are redacted; business records are synthetic.
 
 ## Where to start
 
-| If you want… | Read |
+| Need | Document |
 |---|---|
-| The **requirement-by-requirement answer** for an architecture review | [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) — start at its **Requirement map** |
-| **Reusable guidance** for any enterprise — no customer, subscription or tenant specifics, safe to share on its own | [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) |
-| The **raw prompt-agent evidence** behind the numbers | [`FINDINGS.md`](FINDINGS.md) |
-| What was **re-tested and corrected** | [`VALIDATION.md`](VALIDATION.md) |
-| To **run the demos** | [`DEMO-RUNBOOK.md`](DEMO-RUNBOOK.md), and [Running the demos](#running-the-demos) below |
+| Customer-facing requirement comparison and architecture decisions | [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) |
+| Raw prompt-agent measurements and reproduction steps | [`FINDINGS.md`](FINDINGS.md) |
+| Standalone secure deployment guidance | [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) |
+| 60-minute demonstration flow | [`DEMO-RUNBOOK.md`](DEMO-RUNBOOK.md) |
+| Hosted-agent scripts and source variants | [`track-d/README.md`](track-d/README.md) |
 
-## Contents
+`HOSTED-VS-PROMPT-AGENTS.md` is the source of truth for capability decisions.
+The other documents either provide evidence, reusable guidance or execution
+instructions; they do not repeat the full comparison.
 
-1. [Reference architecture](#reference-architecture)
-2. [Choosing a lane per scenario](#choosing-a-lane-per-scenario)
-3. [The three original questions, answered](#the-three-original-questions-answered)
-4. [Hosted agents — would they change any of this?](#hosted-agents--would-they-change-any-of-this)
-5. [What actually drives latency](#what-actually-drives-latency)
-6. [Platform notes and current limitations](#platform-notes-and-current-limitations)
-7. [Repository index](#repository-index)
-8. [Running the demos](#running-the-demos)
-9. [Methodology note](#methodology-note)
+## Requirement summary
 
----
+| Requirement | Prompt agent | Hosted agent | Design decision |
+|---|---|---|---|
+| Private internal APIs | Managed data proxy injects connection credentials | Agent code resolves credentials with its runtime identity | Both work; hosted requires explicit RBAC |
+| Cold start | No measurable idle de-allocation penalty | ~15 s to create a session; first serving turn can be much slower | Prompt for latency-sensitive entry points |
+| Agent harness control | Foundry-managed loop | Customer-owned framework and orchestration | Hosted when custom execution control is required |
+| Code execution | Code Interpreter or ACA session pool | Trusted code in-process; untrusted code in an ACA session pool | Never run model-generated code in the agent process |
+| Request context | `traceparent` and small W3C `baggage` reach tools | Also receives `x-client-*` headers and `metadata` | Neither provides generic OBO to arbitrary APIs |
+| Existing LLM gateway | Admin-owned `ModelGateway` connection | Agent sets `base_url` directly | Prompt provides structural governance; hosted needs egress policy |
+| Custom telemetry | Microsoft spans correlated to the caller trace | Custom spans, metrics and logs; direct OTLP export | Hosted for in-agent telemetry injection |
+| DSPy and arbitrary packages | Not inside the managed loop | Runs in the hosted environment | Hosted |
+| Filesystem memory | Not applicable | Conversation-scoped writable disk | Cache only; not long-term memory |
+| Foundry Memory (preview) | Declarative `memory_search_preview` tool | `FoundryMemoryProvider` or direct Memory Store API | Both supported; Memory does not support VNet integration |
+| Customer-owned long-term state | External tool/API | Direct SDK access with runtime identity | Private Cosmos pattern measured |
+| IP protection | Customer-owned backing stores; tracing can capture prompt text | Same, plus hosted source bundle/image and agent-owned state | Treat telemetry and source artifacts as part of the IP boundary |
 
 ## Reference architecture
 
-Both agent types deployed into **one** locked-down Foundry account and **one**
-customer VNet, sharing the same connections, private endpoints, session pools
-and state store. Every box below was deployed and measured in this POC unless
-noted.
+Both lanes can coexist in one project and share private endpoints, project
+connections, session pools, the LLM gateway and customer-owned state.
 
 ```mermaid
 flowchart TB
-  APP["<b>Customer application tier</b><br/>authenticates the user · mints traceparent + baggage<br/>writes authoritative context to a server-side store"]
+  APP["<b>Customer application tier</b><br/>authenticates user · creates traceparent + baggage<br/>stores authoritative request context"]
 
-  subgraph FOUNDRY["Foundry account — publicNetworkAccess: Disabled, network-injected into your VNet"]
-    PDEF["<b>Lane A · Prompt agent</b><br/>configuration only<br/>Foundry-managed runtime"]
-    PROXY["Managed data proxy<br/>injects connection secrets<br/><i>no keys in your code</i>"]
-    SBX["<b>Lane B · Hosted agent</b><br/>your LangGraph harness in adc-sandbox<br/>own Entra identity · <b>zero RBAC by default</b><br/>conversation-scoped disk · custom OTel · DSPy"]
-    CONN["Project connections<br/>CustomKeys · <b>ModelGateway</b> · Memory"]
+  subgraph FOUNDRY["Foundry account — public access disabled, network-injected"]
+    PDEF["<b>Lane A · Prompt agent</b><br/>configuration · managed loop<br/>declarative tools and Memory"]
+    PROXY["Managed data proxy<br/>injects project-connection credentials"]
+    SBX["<b>Lane B · Hosted agent</b><br/>customer-owned harness<br/>runtime identity · custom OTel · DSPy"]
+    CONN["Project connections<br/>CustomKeys · ModelGateway · OAuth"]
+    PDEF --> PROXY
+    CONN -.-> PROXY
+    CONN -.-> SBX
   end
 
-  subgraph VNET["Customer VNet — delegated subnets, private endpoints, no public exposure"]
-    INTAPI["<b>Internal customer APIs</b><br/>private DNS only"]
-    POOL["<b>ACA session pools</b><br/>Python · Node · Shell · C#<br/>EgressDisabled, pinned packages"]
-    GW["<b>Customer LLM gateway</b><br/>OpenAI-compatible · <b>must speak SSE</b>"]
-    STATE[("Cosmos DB<br/>session + long-term state")]
+  subgraph VNET["Customer VNet — delegated subnets and private endpoints"]
+    API["<b>Internal customer APIs</b><br/>private DNS only"]
+    POOL["<b>ACA session pools</b><br/>Python · Node · Shell · C#<br/>EgressDisabled · pinned packages"]
+    GW["<b>Customer LLM gateway</b><br/>OpenAI-compatible · SSE"]
+    STATE[("Customer-owned Cosmos DB<br/>session and long-term state")]
   end
 
-  PROV["<b>Model providers</b><br/>Azure catalog natively: OpenAI · Anthropic · Meta · Mistral · xAI<br/><b>Gemini is not in the catalog — the gateway is the only route</b>"]
-  OBS["Telemetry — App Insights always<br/><b>hosted also exports OTLP to Datadog / Splunk</b>"]
+  MEMORY["<b>Foundry Memory store</b> (preview)<br/>prompt: memory_search_preview<br/>hosted: FoundryMemoryProvider / API<br/><b>no VNet integration</b>"]
+  MODELS["<b>Model providers</b><br/>Azure catalog: OpenAI · Anthropic · Meta · Mistral · xAI<br/>Gemini only through the gateway"]
+  OBS["<b>Observability</b><br/>Application Insights<br/>hosted can also export OTLP directly"]
 
   APP -->|"traceparent + baggage"| PDEF
   APP -->|"x-client-* · metadata · traceparent"| SBX
-  CONN -.-> PROXY
-  CONN -.-> SBX
-  PDEF --> PROXY
 
-  PROXY --> INTAPI
+  PROXY --> API
   PROXY --> POOL
   PROXY --> GW
-  SBX --> INTAPI
+  SBX --> API
   SBX --> POOL
   SBX --> GW
   SBX --> STATE
 
-  GW --> PROV
-  PDEF -.->|"Microsoft spans only"| OBS
-  SBX -->|"custom spans + metrics"| OBS
+  PDEF -.->|"declarative tool"| MEMORY
+  SBX -.->|"provider or low-level API"| MEMORY
+  GW --> MODELS
+  PDEF -.->|"Microsoft spans"| OBS
+  SBX -->|"custom spans + metrics + logs"| OBS
 
   classDef lane fill:#dae8fc,stroke:#6c8ebf,color:#12315e
   classDef ok fill:#d5e8d4,stroke:#82b366,color:#1b5e20
   classDef note fill:#fff2cc,stroke:#d6b656,color:#7f6000
   class PDEF,SBX lane
-  class APP,PROXY,CONN,INTAPI,POOL,GW,STATE,OBS ok
-  class PROV note
+  class APP,PROXY,CONN,API,POOL,GW,STATE,OBS ok
+  class MEMORY,MODELS note
 ```
 
-**Reading it.** Blue = the two agent lanes. The split that matters is
-*credential and control ownership*: Lane A's secrets are injected by a
-Foundry-managed proxy and its telemetry is Microsoft's, while Lane B resolves
-its own credentials with its own Entra identity and can emit anything it likes —
-including OTLP straight to a non-Azure backend. Everything below the Foundry
-box is shared, so choosing per-scenario costs no extra infrastructure.
+### Boundaries to make explicit
 
-Three things the diagram deliberately makes visible:
-
-- **The gateway is a governance boundary only in Lane A.** A prompt agent
-  reaches it through an admin-owned `ModelGateway` connection; a hosted agent
-  sets `base_url` to whatever its sandbox can reach, and the sandbox has
-  unrestricted outbound internet. Enforcement for Lane B is subnet egress
-  control, not a platform feature.
-- **Context arrives, but by different channels.** `traceparent` and `baggage`
-  survive into Lane A's tools; Lane B additionally receives `x-client-*` headers
-  and `metadata` verbatim. Neither receives the caller's `Authorization`, so a
-  server-side context store and a token broker are customer-side components in
-  both cases.
-- **Untrusted code never runs in the agent process.** In-process execution in
-  Lane B is ~100,000× faster but shares the agent's identity, environment and
-  network — so model-generated code goes to an ACA session pool from either
-  lane.
+1. **Gateway governance differs by lane.** A prompt agent uses an admin-owned
+   `ModelGateway` connection. Hosted code can select any reachable endpoint, so
+   mandatory gateway routing requires subnet egress controls.
+2. **Context is not authorization.** Headers, metadata and baggage are
+   caller-supplied. Authoritative identity/tenant context belongs in a
+   server-side store; delegated API access requires Toolbox/OAuth or a token
+   broker.
+3. **Untrusted code requires a separate sandbox.** Hosted in-process execution
+   shares the agent identity, environment and network. Model-generated or
+   user-supplied code goes to an ACA session pool from either lane.
+4. **Managed Memory is outside the private-network guarantee.** Foundry Memory
+   supports both lanes, but the preview service does not support VNet
+   integration. Use customer-owned storage where a fully private data path is
+   mandatory.
 
 ## Choosing a lane per scenario
-
-The two lanes are not a one-time platform decision. Different scenarios have
-different controllability needs, and the same project can run both.
 
 ```mermaid
 flowchart TB
   START(["New agent scenario"])
-  Q1{"Do you need to own the<br/><b>agent harness</b>?<br/><i>custom orchestration · DSPy · custom OTel<br/>own memory loop · non-Python deps</i>"}
-  Q2{"Is the <b>LLM gateway</b> a mandated<br/>governance control point<br/>rather than a convenience?"}
-  Q3{"Is <b>first-response latency</b><br/>user-facing and tight?"}
+  CONTROL{"Need to own the agent harness?<br/><i>custom orchestration · DSPy · custom OTel<br/>custom memory integration · system dependencies</i>"}
+  GATEWAY{"Must the LLM gateway be<br/>structurally enforced?"}
+  LATENCY{"Is first-response latency<br/>user-facing and tight?"}
 
-  PROMPT["<b>Lane A · Prompt agent</b><br/>no cold start · platform-held credentials<br/>gateway enforced by an admin-owned connection<br/><i>accept: no custom code, libraries or metrics in the loop</i>"]
-  HOSTED["<b>Lane B · Hosted agent</b><br/>full harness control · custom telemetry to any backend<br/>DSPy · in-process code · state you own<br/><i>accept: in-VNet CI/CD · per-agent RBAC · ~15 s session start<br/>subnet egress control · your own state store</i>"]
-  MIX["<b>Prompt agent as the governed front door</b><br/>hosted agent behind it as a tool,<br/>or hosted agent on an egress-restricted subnet"]
-  WARM["<b>Hosted agent + warm conversation pool</b><br/>pin conversations, keep them alive with cheap turns<br/><i>there is no platform keep-warm setting</i>"]
+  PROMPT["<b>Prompt agent</b><br/>managed loop · no measured cold start<br/>platform-held credentials · governed gateway"]
+  HOSTED["<b>Hosted agent</b><br/>full harness control · custom telemetry<br/>libraries · state and execution control"]
+  MIXED["<b>Mixed pattern</b><br/>prompt agent as governed front door<br/>hosted capability behind a tool boundary"]
+  WARM["<b>Hosted + warm conversation pool</b><br/>pin and heartbeat conversations<br/>no platform keep-warm setting"]
 
-  START --> Q1
-  Q1 -->|"No"| PROMPT
-  Q1 -->|"Yes"| Q2
-  Q2 -->|"Yes — must be structurally enforced"| MIX
-  Q2 -->|"No"| Q3
-  Q3 -->|"Yes"| WARM
-  Q3 -->|"No"| HOSTED
+  START --> CONTROL
+  CONTROL -->|"No"| PROMPT
+  CONTROL -->|"Yes"| GATEWAY
+  GATEWAY -->|"Yes"| MIXED
+  GATEWAY -->|"No"| LATENCY
+  LATENCY -->|"Yes"| WARM
+  LATENCY -->|"No"| HOSTED
 
-  NOTE["<b>Both lanes coexist in one project</b><br/>sharing connections, private endpoints, session pools and Cosmos.<br/>Pick per scenario, not once for the estate."]
+  NOTE["Both lanes can share one project,<br/>connections, private endpoints and state.<br/>Choose per scenario, not once per estate."]
   PROMPT -.- NOTE
-  MIX -.- NOTE
-  WARM -.- NOTE
   HOSTED -.- NOTE
+  MIXED -.- NOTE
+  WARM -.- NOTE
 
-  classDef a fill:#dae8fc,stroke:#6c8ebf,color:#12315e
-  classDef b fill:#e1d5e7,stroke:#9673a6,color:#4a235a
-  classDef q fill:#fff2cc,stroke:#d6b656,color:#7f6000
-  classDef n fill:#f5f5f5,stroke:#999,color:#333
-  class PROMPT a
-  class HOSTED,WARM,MIX b
-  class Q1,Q2,Q3 q
-  class NOTE,START n
+  classDef prompt fill:#dae8fc,stroke:#6c8ebf,color:#12315e
+  classDef hosted fill:#e1d5e7,stroke:#9673a6,color:#4a235a
+  classDef decision fill:#fff2cc,stroke:#d6b656,color:#7f6000
+  classDef neutral fill:#f5f5f5,stroke:#999,color:#333
+  class PROMPT prompt
+  class HOSTED,MIXED,WARM hosted
+  class CONTROL,GATEWAY,LATENCY decision
+  class START,NOTE neutral
 ```
 
----
+## Foundry Memory requirements
 
-## The three original questions, answered
+Prompt and hosted integrations use the same Memory Store service:
 
-### 1. Security — VNet setup and reaching internal APIs from the agent service
-
-**Yes, and it is proven end-to-end.**
-
-A Foundry prompt agent called an API that has **no public DNS record**, hosted in
-an internal-only Azure Container Apps environment, from a Foundry account with
-`publicNetworkAccess: Disabled`. The API key never appeared in source code or in
-the prompt — it lives in a Foundry `CustomKeys` project connection and is
-injected by the agent data proxy.
-
-Isolation was proven with negative tests, not asserted:
-
-| Test | Result |
+| Agent type | Integration |
 |---|---|
-| Authenticated agent tool call | **200** — returned the internal record status |
-| Unauthenticated call to same route | **401** |
-| External DNS resolution of the API host | **Unresolvable** |
-| External call to the Foundry data plane | **403** |
+| Prompt agent | Add `MemorySearchPreviewTool` to the agent definition |
+| Hosted agent using Microsoft Agent Framework | Add `FoundryMemoryProvider` as a context provider |
+| Hosted agent using another framework | Call the low-level Memory Store API with an explicit scope |
 
-> **Decision to make early:** network injection **cannot be added to an existing
-> public Foundry account**. If you have been prototyping on a public account, the
-> production account is a rebuild, not a setting change.
+The identity provisioning or calling the store and the hosted-agent runtime
+identity each require **Foundry User** and **Cognitive Services OpenAI User** at
+the project scope. The latter permits memory extraction and embedding calls.
 
-**If the internal API is on-premises or in another VNet** — the realistic
-enterprise case — the Foundry configuration is unchanged. What changes is only
-how the packet leaves the VNet (peering / ExpressRoute / VPN, optionally through
-a firewall via a UDR on the agent subnet) and how the name resolves (Azure DNS
-Private Resolver with a conditional-forwarding ruleset to corporate DNS). Two
-traps: **do not enable TLS inspection** on that path, and allow the
-`AzureActiveDirectory` service tag for managed-identity token acquisition.
-Recommended shape is APIM in internal VNet mode as the single private ingress.
+This POC measured store creation from the locked-down VNet in 1.08 s and store
+listing from a hosted sandbox in 204–391 ms. Microsoft documents cross-session
+recall and per-user scoping, but those behaviours were not independently
+benchmarked here. Memory is public preview and does not support VNet
+integration.
 
-Setup checklist and hybrid guidance:
-[`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) Parts 1–2.
-Evidence: [`FINDINGS.md`](FINDINGS.md) §2.
+Official references:
 
----
+- [Give a hosted agent persistent memory](https://learn.microsoft.com/azure/foundry/agents/quickstarts/quickstart-memory-hosted-agent)
+- [Create and use memory in Foundry Agent Service](https://learn.microsoft.com/azure/foundry/agents/how-to/memory-usage)
 
-### 2. Cold start — is there a de-allocation penalty, and can agents be kept alive?
-
-**The premise does not hold. There is no agent de-allocation.**
-
-| Measurement | Result |
-|---|---|
-| First call after **10 minutes idle** | **2.45 s** vs 1.73 s warm → **+0.72 s** |
-| Cold process, first call, end to end | 7.20 s |
-| — of which Entra token acquisition | 2.23 s |
-| Brand-new PythonLTS sandbox session | **0.33–0.36 s** |
-
-The ~5 s felt on the first call is **client-side** — credential acquisition plus
-TLS/connection setup. It is fixed in application code by caching the
-credential and reusing one long-lived HTTP client. No Azure change, no cost.
-
-**"Keep agents alive" is the wrong lever.** Tested directly: explicitly
-reusing a code-interpreter container gave **no benefit** (median 17.79 s reused
-vs 16.40 s fresh). Warming buys nothing because the sandbox was never the
-bottleneck — the cost is the extra model round-trips to author, execute and
-summarise code.
-
-**The real risk is the latency tail, and PTU measurably fixes it.** Interleaved
-A/B on the same account, forced code execution:
-
-| Deployment | Median | Max |
-|---|---:|---:|
-| Global Standard | 15–30 s | **173.9 s** |
-| **Provisioned (15 PTU)** | **8.8–9.5 s** | **20.9–29.9 s** |
-
-Caveats: PTU **narrows but does not flatten** the
-distribution (one PTU call still took 29.9 s), a fresh PTU deployment returns
-`400 Bad request for dependent service` for roughly its first two minutes, and
-it costs **$1.00/PTU/hour** Global (~$15/hr at the 15-unit minimum).
-
-Evidence: [`FINDINGS.md`](FINDINGS.md) §1 (§1.6 for PTU)
-
----
-
-### 3. Code execution — patterns and trade-offs with Azure Container Apps
-
-**A self-controlled ACA session pool wins decisively over the built-in tool.**
-
-> **What "controlled ACA pool" means.** An [Azure Container Apps *dynamic
-> session pool*](https://learn.microsoft.com/en-us/azure/container-apps/sessions)
-> that **you** create in **your own** subscription and attach to the agent as a
-> tool, instead of using Foundry's built-in Code Interpreter. Each run gets a
-> Hyper-V–isolated sandbox, but you own the container image, the installed
-> packages, the network policy, the CPU/memory size, concurrency and session
-> lifetime. The built-in Code Interpreter is the opposite trade-off: zero setup,
-> but Microsoft owns the image, the packages and the network posture — so you
-> cannot pin a library version or prove egress is blocked.
->
-> There are two pool types, and the difference matters:
->
-> | Pool type | Image | Choose when |
-> |---|---|---|
-> | `PythonLTS` (managed) | Microsoft's Python image | You want isolation and concurrency control, but not custom packages. **MCP works here** |
-> | `CustomContainer` | **Yours, from your registry** | You must pin versions, add private libraries, or prove egress is disabled |
->
-> "Controlled" in this repo always means **`CustomContainer`** — the image pins
-> `polars`, `pyarrow` and `matplotlib`, and sets `EgressDisabled`.
-
-Same run, same environment:
-
-| | Controlled ACA pool | Built-in Code Interpreter |
-|---|---:|---:|
-| Latency | **0.08 – 0.72 s** | **15.2 s median** |
-| Package versions | Pinned by you | Platform-controlled |
-| Runtime egress | Explicit `EgressDisabled` | Platform-controlled |
-| Concurrency | Explicit `maxConcurrentSessions` | Platform quota |
-| Reliability | 0 failures observed | 1 of 3 calls failed (90 s timeout) in one run; HTTP 400s seen |
-
-That is a **20–200x** latency difference, plus deterministic packages and
-provable egress control — which matter more than latency for a compliance story.
-
-**The real design constraint is concurrency, not warmth.** Every distinct session
-identifier holds a slot for the **full cooldown period**. With
-`maxConcurrentSessions: 5` and a 600 s cooldown reproduced hard `429`s. Size
-`maxConcurrentSessions` against **arrival rate × cooldown**, reuse one identifier
-per user/conversation, and handle 429 explicitly rather than treating it as a
-slow cold start.
-
-Evidence: [`FINDINGS.md`](FINDINGS.md) §3
-
----
-
-## Hosted agents — would they change any of this?
-
-The three questions above were answered with **prompt agents**. Every
-requirement — those three plus request-context propagation, the multi-provider
-LLM gateway, custom telemetry, library integration and filesystem memory — was
-then re-run with **hosted agents** (own code, LangGraph harness) in the same
-locked-down account. Summary below; full detail in
-[`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md).
-
-| | Prompt agent | Hosted agent |
-|---|---|---|
-| VNet + internal API | Works; credential injected by the platform | Works, but the agent identity starts with **zero RBAC** and deployment is a **data-plane** operation, so CI/CD must run in-VNet |
-| Cold start | No measurable penalty | **~15 s per new session**, and `ACTIVE` does not mean ready to serve |
-| Code execution | Sandboxed pool, ~0.57–5.94 s | In-process, **0.15 ms**, but **no isolation** from the agent's own identity and secrets |
-| Request context (identity, tenant, correlation) | **W3C `traceparent` and `baggage` measured reaching the internal API**; `x-client-*` and `metadata` do not survive; per-user auth via Toolbox/MCP | **`x-client-*` headers, `metadata` and W3C `traceparent` measured working end to end** |
-| Existing LLM gateway (multi-provider) | Needs an admin-created **`ModelGateway`** connection; model is `<connection>/<model>` | Set `base_url` in your own client — no connection, and no governance either |
-| Custom telemetry and metrics | Microsoft's traces only — **no custom dimensions or metrics**, measured; but spans carry **your** trace id as `operation_Id` | **Custom spans and metrics measured landing in App Insights** with customer-defined dimensions |
-| Telemetry to a non-Azure backend (Datadog, Splunk, OTLP collector) | No | **Yes — measured**: traces, metrics and logs delivered to a third-party OTLP sink |
-| Prompt-optimisation libraries (DSPy) | Not possible inside the loop | **DSPy 3.3.0 installed and ran** against the Foundry model |
-| Filesystem memory | n/a | Writable 4.1 GB disk; **persists per conversation, not across them** |
-
-**On OBO:** neither agent type can perform a generic on-behalf-of exchange to an
-arbitrary internal API — the caller's `Authorization` header is never delivered
-to agent code. Per-user delegated access is available through **Toolbox/MCP
-connections** (`oauth2`, `user-entra-token`); anything else needs a token-broker
-or a server-side context store.
-
-**On the LLM gateway:** the usual driver is reaching several providers — here
-Azure OpenAI and **Google Gemini**. Enumerating `eastus2` returns eleven
-publishers — Anthropic, Meta, Mistral, DeepSeek, xAI, Cohere and others — but
-**no Google**. So every other named provider can be used natively with no
-gateway at all, while Gemini can only be reached *through* one. Both agent types
-were measured working against a real gateway deployed in the VNet, including
-tool calling. The trap: Foundry's BYOM path **always requests streaming**, so a
-gateway that only speaks non-streaming JSON fails with an opaque `500`.
-
-**On the follow-up requirements:** custom telemetry, DSPy and filesystem memory
-were measured directly. A hosted agent emitted its own OpenTelemetry span and
-metrics with customer-defined dimensions and both were queried back out of Application
-Insights; **DSPy 3.3.0** installed and ran a real program against the Foundry
-model; and the sandbox has a writable 4.1 GB disk that **persists across
-chained turns but not across conversations** — so the *filesystem* is
-short-term memory only. All three are hosted-agent-only.
-
-Long-term memory is meant to be **Foundry Memory**, and that was tested too.
-A memory store was created successfully from inside the VNet, but **ingestion
-failed with a 401** from the Memory service to its own model deployment — and
-the identical failure reproduced on a **fully public** project and survived
-three different RBAC grants, so it is not a networking or permissions problem.
-Memory is preview; treat long-term memory as unproven and keep the measured
-fallback of conversation state in the customer's own Cosmos DB.
-
-**On multi-language support:** the agent runtime itself is Python-only in
-practice. Multi-language execution lives in session pools, where the resource
-provider accepts `PythonLTS`, `NodeLTS`, `Shell`, `CsharpLTS`, `GpuBase` and
-`CustomContainer` — the last two of which are undocumented, and `Shell` gives
-one sandbox with Python, Node, Java and a C compiler.
-
-**The gateway can be the customer's own, and can stay private.** It does not
-have to be Azure API Management or any Azure product — the one measured here is
-a stdlib-only Python server, and the connection simply takes its URL. It also
-resolved to a **private IP** inside the VNet, unreachable from the public
-internet, and Foundry reached it regardless. The full endpoint contract is in
-[`FINDINGS.md`](FINDINGS.md) §4.5.
-
-Full requirement-by-requirement comparison, capability matrix and the twenty-six
-operational gotchas: [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)
-
----
-
-## What actually drives latency
-
-**"Keep the agents warm" optimizes the wrong variable.** It is a non-problem. The
-three actual risks are different things with different fixes:
-
-| Real risk | Actual fix |
-|---|---|
-| Client initialisation (~5 s, first call only) | Cache credential, reuse HTTP client — free |
-| **Model capacity tail (4.5 s → 174 s)** | **Provisioned throughput (PTU)** |
-| Session concurrency (hard 429s) | Size `maxConcurrentSessions` = arrival rate × cooldown |
-
-The tail is the one that hurts in production, and it is **invisible in a POC that
-only measures averages**. A 5–10 s cold-start concern is real but misattributed.
-
-## Platform notes and current limitations
-
-Four behaviours that are **not obvious from the documentation**. None of
-them block the architecture in this repo, but each is worth knowing before you
-design around it — and each has a workaround.
-
-### 1. MCP cannot be enabled on CustomContainer session pools — contradicts published docs
-
-**Context, because this is easily misread.** MCP is a general tool protocol —
-if you already have an MCP server, you attach it to an agent as ordinary
-configuration and none of this applies. This finding is narrower: an ACA session
-pool can ship a **pre-built MCP server** in front of the code sandbox, so an
-agent can run code without you writing a server. There the **pool is the MCP
-server** (exposing `launchPythonEnvironment`, `runPythonCodeInRemoteEnvironment`)
-and the agent is the client — which is why `mcpServerSettings` is a *pool*
-property and `containerType` matters. Losing it costs convenience, not
-capability: you can still front the pool with your own MCP server, an OpenAPI
-tool, or direct `/executions` calls.
-
-Tested along the fully documented path, with every variable removed:
-
-- **PUT** (create-or-replace), not PATCH — `mcpServerSettings` is absent from the
-  documented PATCH model, so PUT is the only in-contract way to set it
-- API version **`2025-10-02-preview`** — the newest *published* preview
-- Image **`mcr.microsoft.com/k8se/services/codeinterpreter:0.9.18-python3.12`** —
-  the exact image from Microsoft's official sample
-- `Microsoft.App/SessionPoolsSupportMCP` = **Registered**, documented region (East US)
-
-Result:
-
-```text
-PUT  -> 201 Created   (request body contained mcpServerSettings.isMcpServerEnabled: true)
-poll -> provisioningState: Succeeded
-GET  -> "mcpServerSettings": null
-POST .../fetchMCPServerCredentials -> 400 SessionMCPServerNotEnabled
-```
-
-Control — identical call against a **PythonLTS** pool — returns `200 {"apiKey": …}`.
-
-This contradicts Microsoft's own published material:
-
-- The ACA MCP overview states the platform-managed MCP server exposes its tools
-  "regardless of the session pool's `containerType`".
-- The Foundry custom-code-interpreter article and its official `foundry-samples`
-  Bicep provision `containerType: 'CustomContainer'` **together with**
-  `mcpServerSettings.isMcpServerEnabled: true`.
-
-Both cannot be true. Either the service is missing support or the docs and sample
-are wrong.
-
-**What to do.** If you need MCP today, use a managed `PythonLTS` pool — MCP works
-there and is what this POC used for the agent-driven path. If you need custom
-packages *and* MCP, keep them separate: run the custom pool via the direct
-`/executions` data-plane call (0.08–0.72 s, shown above) and treat MCP as a
-managed-pool-only capability until this is resolved. Confirm current status with
-your Microsoft account team before committing a design to it.
-
-### 2. API versions: pin deliberately
-
-- `2026-03-02-preview` is **advertised by the resource provider** but is **not
-  published** in `azure-rest-api-specs`. It is discoverable via `az provider show`
-  — **do not pin it**, as you may be unable to get support for it.
-- `mcpServerSettings` is annotated `@removed(Versions.v2026_01_01)`, so **MCP is
-  absent from the GA `2026-01-01` contract entirely**. If you standardise on GA,
-  you lose the capability silently — pin a preview version where you need MCP.
-- Field casing is inconsistent between the spec (`isMcpServerEnabled`), the
-  Foundry tutorial (`isMCPServerEnabled`), and an open specs PR (#42917) that
-  cites "ACA backend response body casing does not match".
-- Conceptual docs disagree on the data plane: `session-pool.md` shows
-  `code/execute` with `2024-02-02-preview`, while the TypeSpec and generated REST
-  reference use **`/executions`** with `2025-10-02-preview`. In testing,
-  `/execute`, `/code/execute` and `/executions` all worked on **every** advertised
-  api-version, so nothing breaks — but the docs should converge.
-
-### 3. `readySessionInstances` is silently ignored on PythonLTS pools
-
-Requested on every API version tried, via CLI and raw ARM. The property simply
-never appears in `scaleConfiguration`. **No error, no warning.** It is honoured
-on CustomContainer pools.
-
-**What to do.** Don't build a warm-pool strategy on the managed Python pool — you
-will get nothing and no signal that it was ignored. Always read the pool back
-after deployment and assert the property is present. In practice this matters
-less than expected: session start was ~0.36 s, so **concurrency sizing, not
-warmth, is the real lever** (see §3 above).
-
-Full detail and traces: [`VALIDATION.md`](VALIDATION.md)
-
-### 4. On-premises connectivity is undocumented end to end — validate before committing
-
-Every building block is documented individually — network injection, peered
-VNets, ACA UDR/forced tunneling, Azure Firewall in the agent egress path, DNS
-Private Resolver. But nothing states that the **injected data proxy** honors
-custom VNet DNS / forwarding rulesets, or that agent OpenAPI tool calls over
-ExpressRoute/VPN to on-premises are supported. No documented limitation says
-otherwise either.
-
-**What to do.** The building blocks strongly suggest this works — the agent
-subnet is an ordinary delegated subnet with no route table restrictions — but it
-was not measured here, so treat it as **unverified**. If your internal APIs are
-on-premises or in a peered network, prove it with a spike before committing:
-deploy the stub API in this repo on the far side of the link and run the same
-test. Confirm supportability with your Microsoft account team.
-
-There is also no single authoritative "FQDNs a Foundry prompt agent must reach"
-list, which makes locked-down egress a trial-and-error exercise — budget time for
-it.
-
----
-
-## Repository index
-
-| File | Contents |
-|---|---|
-| [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md) | **Standalone reusable guideline** — secure networking, internal/on-premises API access, latency, code execution. No environment specifics; safe to share as-is |
-| [`FINDINGS.md`](FINDINGS.md) | **Prompt-agent evidence.** Cold start and PTU (§1), private networking and request context (§2), code execution and multi-language pools (§3), LLM gateway (§4), how to reproduce (§5) |
-| [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md) | **The requirement-by-requirement deliverable.** Every stated requirement re-measured with **hosted agents** (LangGraph) against prompt agents: security, cold start, code execution, context propagation, LLM gateway, telemetry, DSPy, multi-language, memory, IP protection — plus a capability matrix and 26 operational gotchas |
-| [`VALIDATION.md`](VALIDATION.md) | Independent re-validation: SDK/API version audit, the two corrected conclusions, PTU measurement |
-| [`DEMO-RUNBOOK.md`](DEMO-RUNBOOK.md) | 60-minute session: agenda, commands, talking points, failure responses |
-| `track-b/`, `track-c/` | Deployment templates, stub API, and demo runners |
-| `probes/` | Measurement harnesses (`revalidate.py`, `ci_verify.py`, `ci_reuse.py`, `ptu_ab.py`) |
-
-## Running the demos
+## Running the POC
 
 ```bash
-./preflight.sh          # verifies identity, subscription, and every demo resource
-./track-b/run-demo.sh   # ~54s — private internal API access
-./track-c/run-demo.sh   # ~96s — code execution comparison
+./preflight.sh          # identity, subscription and deployed-resource checks
+./track-b/run-demo.sh   # private internal API access
+./track-c/run-demo.sh   # code-execution comparison
 ```
 
-`preflight.sh` also guards against the most common failure: the Azure CLI default
-subscription silently changing, which makes every resource look deleted.
+Hosted-agent data-plane operations must run inside the VNet:
 
-> **Note on identifiers.** This POC was run for a specific enterprise. All
-> customer-identifying names have been replaced with neutral equivalents — a
-> `customer.*` telemetry namespace, `CUSTOMER_*` environment variables and
-> generic resource names — so the repo is reusable as-is. Documentation uses
-> redacted account, project and subscription names, and business data
-> (`env-1001`, `Mutual NDA`) is synthetic. The scripts under `track-b/`,
-> `track-c/`, `track-d/` and `probes/` still reference the live deployment they
-> were built against, and need re-pointing before reuse elsewhere.
+```bash
+export AZ_SUBSCRIPTION=<subscription-id>
+./track-d/run-in-vnet.sh inspect_agent.py
+```
 
-## Methodology note
-
-One correction is worth calling out for anyone reusing these numbers. The
-original code-interpreter benchmark used the prompt
-`"Use python to compute sum(range(100))"`. Re-testing proved the model answers
-that **from memory and never invokes the tool** — 0 of 6 invocations. Those
-timings were partly plain model calls.
-
-Every code-execution measurement in this repo now asserts that a
-`code_interpreter_call` actually appears in the response before it is counted.
+The scripts reference the live deployment they were built against and must be
+re-pointed before reuse in another environment. No customer-identifying names
+are committed; telemetry uses the neutral `customer.*` namespace and business
+records are synthetic.

@@ -1,8 +1,8 @@
 # Track D — hosted agents
 
-Re-runs the three customer requirements using **hosted agents** (your own code,
-LangGraph/LangChain harness) instead of prompt agents, in the same locked-down
-Foundry account.
+Evaluates the requirements using **hosted agents** (your own code and a
+LangGraph/LangChain harness) in the same locked-down Foundry account used for
+the prompt-agent measurements.
 
 Results and analysis: [`../HOSTED-VS-PROMPT-AGENTS.md`](../HOSTED-VS-PROMPT-AGENTS.md)
 
@@ -37,8 +37,8 @@ variable you care about on every run.
 | `gateway_probe.py` | Requirement 5: native non-OpenAI models, and what `model` will not accept |
 | `gateway_agent_probe.py` | Requirement 5: BYOM through a `ModelGateway` connection on the v2 agents API |
 | `fs_memory_probe.py` | Requirement 6: is the sandbox filesystem memory? Three turns across two conversations |
-| `memory_probe.py` | Requirement 6: Foundry Memory — create a store, ingest, recall across conversations, check scope isolation |
-| `mem_binding_probe.py` | Requirement 6: does either agent definition expose a Foundry Memory binding? Inspects the shipped SDK models |
+| `memory_probe.py` | Requirement 6: direct Memory Store API — create, ingest, recall across conversations and check scope isolation |
+| `mem_binding_probe.py` | Requirement 6: compare prompt-agent declarative memory with hosted-agent code integration |
 | `sink_check.py` | Requirement 6: read the third-party OTLP sink's received-telemetry log (its FQDN only resolves in-VNet) |
 
 ## Agents
@@ -70,6 +70,10 @@ decoded at start-up.
 
 - The agent's **instance identity needs an explicit role grant** (`Foundry User`
   on the project) — it starts with none.
+- Foundry Memory additionally requires **Cognitive Services OpenAI User** on
+  the project for the identity making memory calls. Hosted agents support
+  Memory through `FoundryMemoryProvider` (Microsoft Agent Framework) or the
+  low-level Memory Store API in application code.
 - For the state demo, that identity also needs **Cosmos DB Built-in Data
   Contributor**.
 - `entry_point` is a command vector: `["python", "main.py"]`.

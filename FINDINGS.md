@@ -10,23 +10,19 @@ Foundry Agent Service environment and measured its behaviour.
 > **This file is evidence, not guidance**, and it covers **prompt agents**.
 > - Reusable recommendations derived from it:
 >   [`SECURE-AGENT-GUIDELINES.md`](SECURE-AGENT-GUIDELINES.md)
-> - The same requirements re-measured with **hosted agents**, plus the
+> - The same requirements evaluated with **hosted agents**, plus the
 >   requirement-by-requirement comparison:
 >   [`HOSTED-VS-PROMPT-AGENTS.md`](HOSTED-VS-PROMPT-AGENTS.md)
-> - How these conclusions were independently re-tested:
->   [`VALIDATION.md`](VALIDATION.md)
 
 **Redaction.** Subscription IDs, tenant details and resource names are replaced
 with placeholders such as `<foundry-account>` and `<subscription-id>`. Log output
 is otherwise verbatim. Business data (`env-1001`, `Mutual NDA`) is synthetic test
 data from a stub API.
 
-**Naming.** This POC was run for a specific enterprise; all customer-identifying
-names have been replaced with neutral equivalents — a `customer.*` telemetry
-namespace, `CUSTOMER_*` environment variables and generic resource names. The
-probe code in this repo emits exactly the names shown here, so re-running
-reproduces the documented output. The namespace itself is arbitrary: the
-finding is that a **caller-chosen** namespace survives end to end.
+**Naming.** Examples use a neutral `customer.*` telemetry namespace,
+`CUSTOMER_*` environment variables and generic resource names. The namespace is
+illustrative; the measured finding is that a **caller-chosen** namespace
+survives end to end.
 
 **Measurement caveat.** Figures come from one environment, region and model. They
 show **relative** cost and **where time is spent**. Re-measure before using any of
@@ -165,7 +161,7 @@ identifiers per user/thread rather than minting one per call. Pool creation take
 > invocations here), so timings taken that way are really plain model calls.
 > Every figure below asserts a `code_interpreter_call` in the response. Use a
 > task the model cannot answer without executing, such as hashing a generated
-> string. See [`VALIDATION.md`](VALIDATION.md) §6.
+> string.
 
 | Scenario | Latency (verified tool execution) |
 |---|---|
@@ -569,7 +565,7 @@ Foundry's built-in Code Interpreter tool remains Python-only.
 ## 3.6 Custom container MCP gap
 
 > Verified via **PUT** (create-or-replace), which is the in-contract path for
-> this property — see [`VALIDATION.md`](VALIDATION.md) §3.
+> this property.
 
 **What MCP means here.** MCP is a general-purpose tool protocol — an agent
 (client) connects to any MCP server you point it at, and attaching one is
@@ -819,6 +815,5 @@ Individual probes:
 - The PTU probe creates a billable deployment. Read the cost note in §1.6 first.
 
 **API version note.** The session-pool data plane accepts `/executions`,
-`/execute` and `/code/execute` across all advertised API versions. Earlier
-testing that suggested only `2024-02-02-preview` worked was an artefact of an
-out-of-contract request body — see [`VALIDATION.md`](VALIDATION.md) §4.
+`/execute` and `/code/execute` across all advertised API versions. Use the
+documented `/executions` route with `2025-10-02-preview`.

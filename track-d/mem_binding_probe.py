@@ -1,9 +1,10 @@
-"""Requirement 6 - how does each agent type bind to Foundry Memory?
+"""Requirement 6 - compare declarative agent-definition memory surfaces.
 
-Inspects the shipped SDK models rather than the docs: this preview is thinly
-documented and the SDK is what the service actually accepts.
+Prompt agents expose MemorySearchPreviewTool through their tools list. Hosted
+agents wire FoundryMemoryProvider or the low-level Memory Store API into their
+own application code, so this probe confirms that no declarative memory field
+is expected on HostedAgentDefinition.
 """
-import os
 import sys
 
 import azure.ai.projects as projects

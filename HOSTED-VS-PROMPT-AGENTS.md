@@ -1,12 +1,11 @@
-# Hosted agents vs prompt agents — measured comparison
+# Azure AI Foundry agents — requirement comparison
 
-The first three sections of [`FINDINGS.md`](FINDINGS.md) answer three customer
-requirements using **prompt agents** (agents defined by configuration, executed
-by the Foundry-managed runtime). This document repeats the same three
-requirements using **hosted agents** — your own container image or code bundle,
-running a LangGraph/LangChain harness — deployed into the **same fully
-locked-down Foundry account** (`publicNetworkAccess=Disabled`, network
-injection into a delegated subnet).
+This document compares **prompt agents** (configuration executed by the
+Foundry-managed runtime) with **hosted agents** (your own container image or
+code bundle and agent harness). Both were evaluated in the same locked-down
+Foundry account with `publicNetworkAccess=Disabled` and network injection into
+a delegated subnet. Detailed prompt-agent evidence is in
+[`FINDINGS.md`](FINDINGS.md).
 
 - **Measured:** August 2026
 - **Harness:** `langchain-azure-ai` 1.2.8, `ResponsesHostServer`, Responses protocol
@@ -27,12 +26,10 @@ using any figure as an SLA.
 with placeholders. Business data (`env-1001`, `Mutual NDA`) is synthetic test
 data from a stub API.
 
-**Naming.** This POC was run for a specific enterprise; all customer-identifying
-names have been replaced with neutral equivalents — a `customer.*` telemetry
-namespace, `CUSTOMER_*` environment variables and generic resource names. The
-probe code in this repo emits exactly the names shown here, so re-running
-reproduces the documented output. The namespace itself is arbitrary: the
-finding is that a **caller-chosen** namespace survives end to end.
+**Naming.** Examples use a neutral `customer.*` telemetry namespace,
+`CUSTOMER_*` environment variables and generic resource names. The namespace is
+illustrative; the measured finding is that a **caller-chosen** namespace
+survives end to end.
 
 ---
 
@@ -50,7 +47,7 @@ The customer requirements this POC was run against, and where each is answered.
 | Telemetry & metrics — inject custom telemetry | [§7](#7-telemetry-and-metrics) | Hosted only for injection, including to a non-Azure backend; both correlate on trace id |
 | IP protection — data, memory and session state | [§11](#11-ip-protection--where-your-data-sits) | Customer-owned stores; two gaps to raise (abuse monitoring, hosted source code) |
 | Library integration — DSPy and similar | [§8](#8-library-integration--dspy-and-arbitrary-packages) | Hosted only; DSPy 3.3.0 ran a real program in the sandbox |
-| Short/long-term memory via filesystem | [§10](#10-memory-filesystem-and-state) | Filesystem is conversation-scoped; long-term needs Foundry Memory or your own store |
+| Short/long-term memory via filesystem | [§10](#10-memory-filesystem-and-state) | Filesystem is conversation-scoped; Foundry Memory supports both agent types but lacks VNet integration |
 | Request context & identity propagation | [§5](#5-request-context-and-identity-propagation) | Both propagate context; **neither offers generic OBO** |
 
 ---
@@ -77,9 +74,11 @@ The customer requirements this POC was run against, and where each is answered.
 
 # 1. Executive summary
 
-All requirements raised so far are satisfiable in a fully private account.
-Several are satisfied *differently* enough between the two agent types to
-change an architecture review — and two of them point in opposite directions.
+Most requirements are satisfiable in a private, network-injected account.
+Foundry Memory is the exception: it supports both agent types, but the preview
+service does not support VNet integration. Several requirements are satisfied
+*differently* enough between the two agent types to change an architecture
+review — and two of them point in opposite directions.
 
 | Requirement | Prompt agent | Hosted agent | Verdict |
 |---|---|---|---|
@@ -92,6 +91,7 @@ change an architecture review — and two of them point in opposite directions.
 | **6b. Library integration (DSPy)** | Not possible in the loop | **DSPy 3.3.0 installed and ran** | Hosted only |
 | **6c. Filesystem memory** | n/a | Writable 4.1 GB disk, **persists per conversation, not across them** | Short-term yes, long-term no |
 | **6d. Multi-language execution** | Session pools: Node, Shell, C#, GPU, custom | Same pools; runtime itself is Python | Both, via pools |
+| **6e. Managed long-term memory** | Declarative `memory_search_preview` tool | `FoundryMemoryProvider` or direct Memory Store API | Both supported; Memory is preview and lacks VNet integration |
 
 > **Architecture diagrams.** The mixed-estate reference architecture and a
 > per-scenario lane-selection flow are in
@@ -1232,7 +1232,7 @@ So the filesystem is **conversation-scoped**. [Measured]
   persists, and the warm turn is also less than half the latency.
 * **Long-term memory via filesystem: no.** A new conversation gets a new
   sandbox and an empty disk. Anything that must outlive a conversation belongs
-  in a store — Cosmos DB, Azure Storage or Foundry Memory (§14.2).
+  in a store — Cosmos DB, Azure Storage or Foundry Memory (§10.2).
 
 Microsoft documents session storage as surviving the 15-minute idle timeout and
 being deleted after **30 days of inactivity**, with up to 20 GiB at 1 vCPU or
@@ -1243,60 +1243,64 @@ record. There is **no documented Azure Files or persistent-volume mount**.
 ## 10.2 Foundry Memory
 
 "No long-term memory" above refers to the **filesystem**, not to the platform.
-Foundry Memory is the managed long-term memory service and the architectural
-answer to the requirement. The result is mixed.
+Foundry Memory is the managed long-term memory service. It supports both prompt
+agents and hosted agents, with different integration models. [Documented]
 
-**What worked.** A memory store was created successfully **from inside the
-locked-down VNet**, in 1.08 s:
+For prompt agents, Foundry injects memory through the
+`memory_search_preview` tool. For hosted agents, Microsoft publishes an
+end-to-end quickstart using `FoundryMemoryProvider` from Microsoft Agent
+Framework. The provider retrieves relevant memories before model calls and
+updates the store after turns. Other hosted frameworks, including LangGraph,
+can use the low-level Memory Store API directly. [Documented]
+
+Official references:
+
+* [Give a hosted agent persistent memory](https://learn.microsoft.com/azure/foundry/agents/quickstarts/quickstart-memory-hosted-agent)
+* [Create and use memory in Foundry Agent Service](https://learn.microsoft.com/azure/foundry/agents/how-to/memory-usage)
+
+### Required identity roles
+
+The identity provisioning or calling the store and the hosted agent's
+**runtime identity** each need these roles at the Foundry project scope:
+
+* **Foundry User**
+* **Cognitive Services OpenAI User**
+
+The second role is required because memory extraction and indexing call the
+store's configured chat and embedding deployments. Without it, writes return
+`401 Authentication to the Azure OpenAI resource failed` and the store remains
+empty. [Documented]
+
+### Private-project measurements and limitation
+
+A memory store was created successfully **from inside the locked-down VNet** in
+1.08 s:
 
 ```text
 kind=default  chat_model=gpt-4o-mini  embedding_model=text-embedding-3-small
 options: user_profile_enabled, chat_summary_enabled
 ```
 
-This is worth stating plainly because the documentation warns that memory
-stores lack VNet integration: **store creation was not blocked by the private
-network.** [Measured]
-
-**What did not work.** Ingesting a conversation with `begin_update_memories`
-failed, and kept failing:
+The hosted sandbox also listed the project's stores using its own identity:
 
 ```text
-ResourceError: Provided Azure resource encountered an error.
-  deployment: <project-guid>/deployments/gpt-4o-mini
-  details: {"type":"Authentication","status_code":401,
-            "description":"Authentication to the Azure OpenAI resource failed."}
+list_ok=true  list_ms=204..391  stores=['poc-longterm-memory']
 ```
 
-The Memory service could not authenticate to the model deployment it had been
-configured with. Three likely causes were each ruled out:
-
-| Hypothesis | Test | Result |
-|---|---|---|
-| The VNet is blocking it | Ran the identical probe against a **fully public** project | **Same 401** — not a network problem |
-| The project identity lacks rights | Granted `Cognitive Services OpenAI User`, then `Cognitive Services User`, then `Cognitive Services OpenAI Contributor` | **Same 401** after propagation |
-| `disableLocalAuth` breaks key auth | Private account has it `true`, public account does not | Both fail **identically** |
-
-So the ingestion path did not work in this subscription, in either network
-posture, with or without extra RBAC. Store creation and retrieval APIs respond
-normally; it is specifically the model-backed ingestion step that fails.
+Store creation and listing are therefore reachable from the private project.
 [Measured]
 
-**How to read this.** Foundry Memory is **preview**, and this is one
-subscription in one region — it is not proof the feature is broken for
-everyone. But it does mean:
+This does **not** remove the published network limitation: Microsoft documents
+that memory stores do **not support VNet integration**. These measurements prove
+API reachability, not that extraction, indexing or stored data remain on the
+customer VNet. Treat that as a security-design constraint for a fully private
+architecture. [Documented]
 
-* **Cross-conversation recall and per-user scope isolation are `[Unknown]`
-  here** — they were never reached, and this document does not claim measured
-  results it does not have.
-* Long-term memory should not be scheduled as "already solved" on the strength
-  of the documentation. Either validate it early in your own tenant, or
-  plan the fallback.
-* The fallback is well-trodden and already proven in this POC: **conversation
-  state in the customer's own Cosmos DB**, measured at 745 ms write / 938 ms
-  read over a private endpoint (§10.4). That also keeps memory inside the
-  customer's subscription, which suits the IP-protection requirement in §11 better than a
-  managed store does.
+Foundry Memory is public preview. Cross-session recall and per-user scope
+isolation are supported in the official quickstart but were not independently
+measured in this POC. For workloads that require a fully private data path, a
+GA service, or direct ownership of retention and storage, the Cosmos-backed
+pattern in §10.4 remains the measured alternative.
 
 Two SDK details worth noting: the model fields are
 `chat_model` / `embedding_model` on `MemoryStoreDefaultDefinition` (not
@@ -1304,13 +1308,17 @@ Two SDK details worth noting: the model fields are
 `"type": "message"` or ingestion fails with *"Failed to parse item with
 unknown/missing type"*. [Measured]
 
-## 10.3 Can a hosted agent use Foundry Memory?
+## 10.3 Agent integration models
 
-Short answer: **it can reach the service, but it does not get the declarative
-binding.** The two halves are worth separating.
+**Yes.** The distinction is how memory is wired into each agent type.
 
-**The binding is a tool, and hosted agents have no tool list.** Inspecting the
-shipped SDK (2.4.0) rather than the docs:
+| Agent pattern | Integration | Scope handling | Label |
+|---|---|---|---|
+| Prompt agent | Add `MemorySearchPreviewTool` to `tools` | `{{$userId}}` can resolve from `x-memory-user-id` or the caller's Entra identity | [Documented] |
+| Hosted agent using Microsoft Agent Framework | Add `FoundryMemoryProvider` as a context provider | Provider supports `scope="{{$userId}}"` | [Documented] |
+| Hosted agent using LangGraph or another framework | Call the Memory Store API from agent code | Code supplies an explicit stable scope | [Documented] |
+
+The SDK definition shapes explain why the wiring differs:
 
 | Model | Relevant fields |
 |---|---|
@@ -1318,54 +1326,25 @@ shipped SDK (2.4.0) rather than the docs:
 | `PromptAgentDefinition` | `instructions`, `model`, **`tools`**, `tool_choice`, `text`, … |
 | `HostedAgentDefinition` | `code_configuration`, `container_configuration`, `cpu`, `memory`, `environment_variables`, `protocol_versions`, `telemetry_config` |
 
-Foundry Memory attaches to an agent as the `memory_search_preview` **tool**,
-which goes in a `tools` list. `PromptAgentDefinition` has one;
-`HostedAgentDefinition` **does not** — a hosted agent brings its own harness, so
-there is nothing for the platform to inject a tool into. Retrieval *and* the
-automatic write-back implied by `update_delay` are therefore prompt-agent
-conveniences. [Measured]
+`HostedAgentDefinition` has no declarative `tools` list because a hosted agent
+brings its own harness. This is not a lack of Memory support:
+`FoundryMemoryProvider` performs retrieval and write-back in application code,
+and the low-level API provides the same building blocks for other frameworks.
+[Measured / Documented]
 
-> ⚠️ **Do not misread `HostedAgentDefinition.memory`.** It is the container's
-> **RAM** (`1Gi`), not the memory service. The name collision is an easy and
-> expensive mistake to make. [Measured]
+> **`HostedAgentDefinition.memory` configures container RAM** (for example,
+> `1Gi`); it does not configure Foundry Memory. [Measured]
 
-**But the API is reachable from inside the sandbox.** A `probe_memory` tool was
-added to the hosted agent and called the memory API as an ordinary client using
-the sandbox's own identity:
+**Deployment guidance.**
 
-```text
-list_ok=true  list_ms=204..391  stores=['poc-longterm-memory']
-```
-
-So the hosted agent can see the project's memory stores over the private
-network, with no extra RBAC beyond the `Foundry User` role its instance
-identity already held. Nothing about hosted agents is fenced off from the
-service. [Measured]
-
-**What could not be confirmed.** `search_memories` from inside the sandbox
-returned `HttpResponseError: (Timeout) The operation was timeout`, reproduced on
-separate invocations while `list()` kept succeeding in the same call. The store
-is empty because ingestion is still blocked by the 401 above, so retrieval
-quality, cross-conversation recall and scope isolation remain **`[Unknown]`**
-for both agent types — this document does not claim them.
-
-One operational detail matters more than the failure itself: the agent turn took
-**163 s**, because the search **hung** rather than failing fast. A dependency
-that blocks for minutes inside a request path is worse than one that errors
-immediately. If Memory sits on a user-facing turn, wrap the call in an
-explicit client-side timeout and a fallback — do not rely on the service to
-fail quickly. [Measured]
-
-**Practical reading.**
-
-* A prompt agent gets managed memory by adding a tool: no code, but no control
-  either.
-* A hosted agent must **own the memory loop** — search at turn start, write back
-  at turn end, from its own code. That is more work, and it is also the option
-  that lets you choose the store, which is what the IP requirement (§11)
-  actually wants.
-* Given the ingestion failure, the Cosmos-backed pattern already measured in
-  §10.4 remains the recommendation for hosted agents until Memory leaves preview.
+* Use `FoundryMemoryProvider` when the hosted agent uses Microsoft Agent
+  Framework; it implements the memory loop around model invocations.
+* With LangGraph or another framework, call the low-level API with an explicit,
+  stable per-user scope and add client-side timeouts and fallback behaviour.
+* Grant both required roles to the **runtime identity that makes the call**, not
+  only to the project identity.
+* Use customer-owned Cosmos DB instead when VNet integration, GA support or
+  direct storage ownership is mandatory.
 
 ## 10.4 Agent state, over the private endpoint
 
@@ -1450,9 +1429,10 @@ Three items worth raising explicitly rather than burying:
 | **Gateway use is governable** | Yes, admin owns the connection | **No** — any endpoint the sandbox reaches | [Measured] |
 | **State to private Cosmos** | BYO Cosmos supported | Yes — keyless AAD, 745 ms write / 938 ms read | [Measured] |
 | **Foundry Tools** | Native `tools=[...]` | Via **Toolbox** MCP endpoint; some tools direct-only | [Documented] |
-| **Foundry Memory** — store creation | **Works, incl. inside the VNet** | Works | [Measured] |
-| **Foundry Memory** — ingestion | **401 to the model deployment**, public and private alike | Same | [Measured] |
-| **Foundry Memory** — recall / scope isolation | Never reached | Never reached | [Unknown] |
+| **Foundry Memory integration** | Declarative `memory_search_preview` tool | `FoundryMemoryProvider` or direct Memory Store API | [Documented] |
+| **Foundry Memory API reachability from private project** | Store created in 1.08 s | Store list returned in 204–391 ms | [Measured] |
+| **Foundry Memory cross-session recall / scope isolation** | Supported; not independently measured here | Supported; not independently measured here | [Documented / Unknown] |
+| **Foundry Memory VNet integration** | **Not supported** | **Not supported** | [Documented] |
 | **BYO Cosmos wiring for hosted threads** | Documented containers | **Mapping undocumented** | [Unknown] |
 | **Observability** | Portal + tracing | Same, plus your own logs; container log stream is essential | [Measured] |
 | **Custom request headers to agent** | No documented mechanism | **`x-client-*` only**; others dropped | [Measured] |
@@ -1465,8 +1445,9 @@ Three items worth raising explicitly rather than burying:
 | **Custom OTel spans from inside the agent** | **No** — instrument the caller | **Yes**, with customer dimensions | [Measured] |
 | **Custom OTel metrics from inside the agent** | **No** | **Yes** — counter and histogram measured | [Measured] |
 | **Export telemetry to non-Azure backend** | Indirect — via Azure Monitor export hop | **Yes** via `OTEL_EXPORTER_OTLP_*`; traces, metrics and logs all arrived | [Measured] |
-| **Foundry Memory as a declarative binding** | **Yes** — `memory_search_preview` tool | **No** — no `tools` list on the definition | [Measured] |
-| **Foundry Memory API reachable from agent code** | n/a — platform calls it | **Yes** — `list()` in ~200 ms from the sandbox | [Measured] |
+| **Foundry Memory as a declarative binding** | **Yes** — `memory_search_preview` tool | No — integration lives in agent code | [Measured / Documented] |
+| **Foundry Memory provider for hosted code** | n/a | **Yes** — official `FoundryMemoryProvider` | [Documented] |
+| **Foundry Memory API reachable from hosted code** | n/a — platform calls it | **Yes** — `list()` in 204–391 ms from the sandbox | [Measured] |
 | **Custom dimensions on the platform's spans** | **No** — dimension set is entirely Microsoft's | n/a — you own the span | [Measured] |
 | **Caller trace id becomes `operation_Id`** | **Yes** | **Yes** | [Measured] |
 | **Prompt/completion text written to App Insights** | **Yes** — `gen_ai.input/output.messages` | Yes, if Azure Monitor is configured | [Measured] |
@@ -1502,7 +1483,7 @@ None of these is obvious from the documentation.
 | 11 | SDK logs a full traceback per empty 204 | Floods `--tail`, pushes real errors out | Silence the `azure` logger |
 | 12 | `az` active subscription is global mutable state | `ResourceGroupNotFound` for resources that exist | Pin `--subscription` on every call |
 
-Further gotchas, all **[Measured]**:
+Further operational gotchas:
 
 | # | Gotcha | Symptom |
 |---|---|---|
@@ -1514,10 +1495,10 @@ Further gotchas, all **[Measured]**:
 | 18 | Filesystem state silently disappears between conversations | Chained turns share a sandbox, so local testing looks persistent; a new conversation gets an empty disk |
 | 19 | `Shell` session pools reject `code` / `codeInputType` | Use `shellCommand`; older API versions report *"not supported in API version 2023-08-01-preview"* even when you asked for a newer one |
 | 20 | `CsharpLTS` and `GpuBase` pool types exist but are undocumented | `CsharpLTS` is not enabled in `eastus2`; discover availability by asking the RP, not the docs |
-| 21 | Foundry Memory ingestion returned `401` to its own model deployment | Reproduced on a **public** project too, so it is not the VNet; survived three RBAC grants |
+| 21 | Memory writes require model access on the **actual caller/runtime identity** | Without `Cognitive Services OpenAI User` at project scope, writes return `401 Authentication to the Azure OpenAI resource failed` and the store stays empty |
 | 22 | Memory items need an explicit `"type": "message"` | Plain `role`/`content` fails with *"Failed to parse item with unknown/missing type"* |
 | 23 | Memory model fields are `chat_model` / `embedding_model` | Not `*_deployment_name` on the options object, which raises `TypeError` |
-| 24 | `HostedAgentDefinition.memory` is container **RAM**, not Foundry Memory | Reads like a memory-service binding; it takes `1Gi`. The memory service attaches as the `memory_search_preview` *tool*, which hosted agents cannot take |
+| 24 | `HostedAgentDefinition.memory` is container **RAM**, not Foundry Memory | It takes `1Gi`; hosted Memory integration uses `FoundryMemoryProvider` or the Memory Store API in agent code |
 | 25 | Oversized W3C `baggage` entries are **silently dropped** | ~2 KB arrives intact; at ~8 KB the large entry vanishes with no error while small ones survive — alert on absence, never assume delivery |
 | 26 | A new agent version does **not** evict warm sandboxes | The first invoke after publishing `:3` ran `:2`'s code; re-invoke until the reported instance id changes, or you will measure the old build |
 

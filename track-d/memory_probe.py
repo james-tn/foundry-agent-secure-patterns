@@ -2,9 +2,11 @@
 
 The filesystem probe showed the sandbox disk is conversation-scoped, so
 anything that must outlive a conversation needs a store. Foundry Memory is the
-managed answer, but the docs flag that memory stores lack VNet integration -
-which matters here because the whole point of this POC is a locked-down
-account.
+managed answer, but memory stores do not support VNet integration.
+
+The caller running this probe needs Foundry User and Cognitive Services OpenAI
+User at the Foundry project scope. A deployed hosted agent needs both roles on
+its runtime identity.
 
 So this measures three separate things rather than assuming:
 
@@ -44,7 +46,11 @@ def emit(label: str, payload: dict) -> None:
 
 def main() -> int:
     endpoint = _config.get("OAI_PROJECT_ENDPOINT")
-    client = AIProjectClient(endpoint=endpoint, credential=DefaultAzureCredential())
+    client = AIProjectClient(
+        endpoint=endpoint,
+        credential=DefaultAzureCredential(),
+        allow_preview=True,
+    )
     memory = client.beta.memory_stores
     print(f"STORE={STORE} CHAT={CHAT} EMBED={EMBED}")
 

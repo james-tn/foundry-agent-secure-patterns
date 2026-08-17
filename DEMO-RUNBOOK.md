@@ -42,7 +42,7 @@ proxy and the session pool, and shaves ~10 s off the live run.
 ### Have open
 
 - Two terminals in the repo root
-- `FINDINGS.md` and `VALIDATION.md`
+- `FINDINGS.md` and `HOSTED-VS-PROMPT-AGENTS.md`
 - Azure portal on the secure resource group (network tab of the Foundry account)
 
 ---
@@ -61,14 +61,10 @@ proxy and the session pool, and shaves ~10 s off the live run.
 
 ## 0–5 — Framing
 
-Say: we took their three questions and built a working POC in their scenario
-rather than answering from documentation. Everything shown is measured, and the
-numbers were independently re-validated against the latest SDK and API versions
-(`VALIDATION.md`).
-
-One honest framing point that sets the tone: **we found and corrected two of our
-own conclusions** during that re-validation. Lead with that — it buys credibility
-for everything else.
+Say: this is a working POC of the customer requirements, not a documentation
+walkthrough. Every claim is labelled **Measured**, **Documented** or **Unknown**;
+the demos assert on service responses, tool calls and wire evidence rather than
+model prose.
 
 ---
 
@@ -244,7 +240,7 @@ unsupportable.
 | Symptom | Response |
 |---|---|
 | `ResourceGroupNotFound` on everything | Wrong subscription. `az account set --subscription "$AZ_SUBSCRIPTION"` |
-| Built-in Code Interpreter times out or 400s | **Do not apologise — this is the finding.** It failed 1 of 3 in an earlier run. Point at the controlled pool's 0.08 s in the same output. |
+| Built-in Code Interpreter times out or 400s | Explain that reliability is part of the comparison, then point to the controlled pool's deterministic package and egress configuration. |
 | Job status stuck `Running` | Normal; Track C takes ~96 s. Talk over it. |
 | Agent returns wrong/empty answer | Runner retries 3x automatically. If it still fails, show `FINDINGS.md` §3. |
 | Whole demo fails | Fall back to the RESULTS.md files — every number is recorded with its evidence. |
