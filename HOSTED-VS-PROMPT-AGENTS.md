@@ -27,24 +27,31 @@ using any figure as an SLA.
 with placeholders. Business data (`env-1001`, `Mutual NDA`) is synthetic test
 data from a stub API.
 
+**Naming.** This POC was run for a specific enterprise; all customer-identifying
+names have been replaced with neutral equivalents — a `customer.*` telemetry
+namespace, `CUSTOMER_*` environment variables and generic resource names. The
+probe code in this repo emits exactly the names shown here, so re-running
+reproduces the documented output. The namespace itself is arbitrary: the
+finding is that a **caller-chosen** namespace survives end to end.
+
 ---
 
 ## Requirement map
 
-DocuSign's stated requirements, and where each is answered.
+The customer requirements this POC was run against, and where each is answered.
 
 | Requirement (as stated) | Section | Short answer |
 |---|---|---|
-| Security — VNet setup and reaching internal DocuSign APIs | [§2](#2-security--vnet-isolation-and-internal-api-access) | Both agent types work privately; hosted needs an explicit RBAC grant |
+| Security — VNet setup and reaching internal customer APIs | [§2](#2-security--vnet-isolation-and-internal-api-access) | Both agent types work privately; hosted needs an explicit RBAC grant |
 | Cold start — can main agents be kept alive? | [§3](#3-cold-start-and-keeping-agents-warm) | No issue for prompt agents; hosted pays ~15 s per session, no keep-warm knob |
 | Code execution — patterns other tenants use with Container Apps | [§4](#4-code-execution), [§9](#9-multi-language-support) | ACA session pools for untrusted code; in-process only for code you shipped |
 | Agent execution & control — control over the agent harness | [§14](#14-choosing-between-them) | This *is* the hosted-vs-prompt choice; hosted gives full harness control |
 | LLM gateway — use our existing gateway | [§6](#6-llm-gateway--using-an-existing-multi-provider-gateway) | Yes, and it can be your own non-Azure gateway; it must speak SSE |
-| Telemetry & metrics — inject DocuSign custom telemetry | [§7](#7-telemetry-and-metrics) | Hosted only for injection, including to a non-Azure backend; both correlate on trace id |
-| IP protection — data, memory and session state | [§11](#11-ip-protection--where-docusign-data-sits) | Customer-owned stores; two gaps to raise (abuse monitoring, hosted source code) |
+| Telemetry & metrics — inject custom telemetry | [§7](#7-telemetry-and-metrics) | Hosted only for injection, including to a non-Azure backend; both correlate on trace id |
+| IP protection — data, memory and session state | [§11](#11-ip-protection--where-your-data-sits) | Customer-owned stores; two gaps to raise (abuse monitoring, hosted source code) |
 | Library integration — DSPy and similar | [§8](#8-library-integration--dspy-and-arbitrary-packages) | Hosted only; DSPy 3.3.0 ran a real program in the sandbox |
 | Short/long-term memory via filesystem | [§10](#10-memory-filesystem-and-state) | Filesystem is conversation-scoped; long-term needs Foundry Memory or your own store |
-| Request context & identity propagation (raised on the call) | [§5](#5-request-context-and-identity-propagation) | Both propagate context; **neither offers generic OBO** |
+| Request context & identity propagation | [§5](#5-request-context-and-identity-propagation) | Both propagate context; **neither offers generic OBO** |
 
 ---
 
@@ -60,7 +67,7 @@ DocuSign's stated requirements, and where each is answered.
 8. [Library integration — DSPy and arbitrary packages](#8-library-integration--dspy-and-arbitrary-packages)
 9. [Multi-language support](#9-multi-language-support)
 10. [Memory, filesystem and state](#10-memory-filesystem-and-state)
-11. [IP protection — where DocuSign data sits](#11-ip-protection--where-docusign-data-sits)
+11. [IP protection — where your data sits](#11-ip-protection--where-your-data-sits)
 12. [Capability matrix](#12-capability-matrix)
 13. [Operational gotchas](#13-operational-gotchas)
 14. [Choosing between them](#14-choosing-between-them)
@@ -121,8 +128,8 @@ change an architecture review — and two of them point in opposite directions.
 
 # 2. Security — VNet isolation and internal API access
 
-> *Requirement: "the VNet setup and accessing DocuSign internal APIs using the
-> agent service."*
+> *Requirement: "the VNet setup and accessing internal APIs using the agent
+> service."*
 
 **Both models reach a private, VNet-only internal API. The difference is who
 holds the credential and who must be granted access.**
@@ -490,7 +497,7 @@ The exact bytes the API received:
 
 ```text
 traceparent: 00-11112222333344445555666677778888-909d89b9288336d0-01
-baggage:     docusign_tenant = contoso-eu, docusign_corr = corr-prompt-77,
+baggage:     customer_tenant = contoso-eu, customer_corr = corr-prompt-77,
              leaf_customer_span_id = 8e6fbb6cd61dad1f
 ```
 
@@ -676,7 +683,7 @@ your web/API tier ──> Foundry ingress ──> prompt agent (Microsoft's loop
                + correlation id)                          token, not you)
 ```
 
-Two practical routes for "get DocuSign context into an internal API":
+Two practical routes for "get caller context into an internal API":
 
 1. **Correlation-only, then resolve server-side.** Put a correlation id in
    `baggage`, and have the internal API — or a thin facade in front of it — look
@@ -698,8 +705,8 @@ itself vouches for the user.
 
 > *Requirement: "we need the ability to utilise our existing LLM gateway."*
 
-**The customer's gateway exists to reach several providers — Azure OpenAI and
-Google Gemini were named explicitly — through one governed endpoint.**
+**The typical driver is reaching several providers — Azure OpenAI and Google
+Gemini in the case measured here — through one governed endpoint.**
 
 Both agent types can use it, but by completely different mechanisms, and only
 one of them is a supported platform feature rather than "your code can do
@@ -898,7 +905,7 @@ hostname resolved to a **private IP**. It was unreachable from the engineer's
 laptop — every test had to be driven from inside the VNet — and **Foundry
 reached it anyway**. [Measured]
 
-That matters for DocuSign: the gateway, and therefore the provider credentials
+That matters: the gateway, and therefore the provider credentials
 it holds, never has to be exposed publicly.
 
 ### What it does *not* have to do
@@ -989,20 +996,20 @@ uninformative `500`.
 
 # 7. Telemetry and metrics
 
-> *Requirement: "the platform must support the injection of DocuSign custom
-> telemetry and metrics."*
+> *Requirement: "the platform must support the injection of custom telemetry
+> and metrics."*
 
 ## 7.1 Hosted agents — custom spans and metrics
 
 A hosted agent emitted a customer-defined span **and** customer-defined metrics
-carrying DocuSign's own dimensions, and both were queried back out of
+carrying customer-defined dimensions, and both were queried back out of
 Application Insights:
 
 | Signal | Name | Dimensions that survived |
 |---|---|---|
-| Span (`dependency`) | `docusign.envelope.validate` | `docusign.marker`, `docusign.envelope_id`, `docusign.tenant` |
-| Counter (`customMetric`) | `docusign.envelopes.processed` | `docusign.marker` |
-| Histogram (`customMetric`) | `docusign.envelope.latency` | `docusign.marker` |
+| Span (`dependency`) | `customer.envelope.validate` | `customer.marker`, `customer.envelope_id`, `customer.tenant` |
+| Counter (`customMetric`) | `customer.envelopes.processed` | `customer.marker` |
+| Histogram (`customMetric`) | `customer.envelope.latency` | `customer.marker` |
 
 `force_flush` returned success, so telemetry is queryable within seconds rather
 than waiting on process shutdown. [Measured]
@@ -1015,8 +1022,8 @@ Two useful details about the sandbox:
   exporter. `OTEL_SERVICE_NAME` and `FOUNDRY_AGENT365_TRACING_ENABLED` are set
   too. [Measured]
 * Hosted agents can additionally export to a **non-Microsoft** backend over
-  OTLP/HTTP. This was measured, not assumed, because DocuSign does not use
-  Azure Monitor — see §7.1. [Measured]
+  OTLP/HTTP. This was measured rather than assumed, because many enterprises
+  do not use Azure Monitor — see §7.1. [Measured]
 
 ## 7.2 Exporting to a non-Azure backend
 
@@ -1029,20 +1036,20 @@ Monitor configuration, then invoked.
 |---|---|
 | Payloads received by the third-party sink | 49 over five invocations |
 | Signals received | `traces`, `metrics`, **and** `logs` |
-| Custom span | `docusign.envelope.validate` arrived, with `docusign.marker`, `docusign.envelope_id`, `docusign.correlation_id`, `docusign.tenant` |
-| Custom metrics | `docusign.envelopes.processed`, `docusign.envelope.latency` arrived, with their dimensions |
-| Resource attributes | `service.name=docusign-hosted-agent`, `docusign.tenant=acme-corp` |
+| Custom span | `customer.envelope.validate` arrived, with `customer.marker`, `customer.envelope_id`, `customer.correlation_id`, `customer.tenant` |
+| Custom metrics | `customer.envelopes.processed`, `customer.envelope.latency` arrived, with their dimensions |
+| Resource attributes | `service.name=customer-hosted-agent`, `customer.tenant=acme-corp` |
 | Content type | `application/x-protobuf` (standard OTLP/HTTP) |
 
-Two findings worth raising on the call:
+Two findings worth highlighting:
 
 * **The platform's own telemetry followed.** Payloads also arrived tagged
   `service.name=trackd-plat` carrying `azure.monitor.opentelemetry.performance_counters`,
   and log records containing the model-call URL
   (`POST …/openai/v1/responses`). Setting the standard OTLP env var
   redirects the *platform's* instrumentation as well as the customer's, so
-  DocuSign gets the full agent trace — including model calls it did not
-  instrument — in its own backend. It also means endpoint URLs leave Azure, so
+  you get the full agent trace — including model calls you did not
+  instrument — in your own backend. It also means endpoint URLs leave Azure, so
   the sink must be treated as in-scope for the IP-protection review (§11).
   [Measured]
 * **Egress is unrestricted**, consistent with §2.4: the sandbox reached the
@@ -1069,7 +1076,7 @@ dependency  execute_tool remote_openapi...      operation_Id=1111...8888
 dependency  chat gpt-4o-mini-2024-07-18         operation_Id=1111...8888
 ```
 
-So DocuSign's own telemetry and Microsoft's join on the standard W3C key with no
+So your own telemetry and Microsoft's join on the standard W3C key with no
 custom plumbing, whichever backend each lands in. Combined with §5.4.1 — where
 the same trace id reaches the internal API — a single trace id spans web tier →
 Foundry → tool → internal API.
@@ -1098,8 +1105,8 @@ emitted from inside a prompt-agent run.** [Measured]
 
 > ⚠️ **IP-protection note.** `gen_ai.input.messages` and `gen_ai.output.messages`
 > contain the **full prompt and completion text**, including system
-> instructions. In this configuration DocuSign's prompts — which they consider
-> IP (§11) — are written to Application Insights. Confirm content-capture
+> instructions. In this configuration your prompts — if you treat them as IP
+> (§11) — are written to Application Insights. Confirm content-capture
 > settings before enabling tracing in production. [Measured]
 
 **Reaching a non-Azure backend.** The project's tracing target is an
@@ -1108,7 +1115,7 @@ first. Getting it to Datadog or Splunk means an export hop — diagnostic settin
 to Event Hub, then a forwarder — rather than the direct OTLP exporter a hosted
 agent can use (§7.1). [Documented]
 
-> If "inject DocuSign telemetry and metrics" means *from inside the agent*,
+> If "inject custom telemetry and metrics" means *from inside the agent*,
 > that is a hosted-agent capability. Prompt agents give you Microsoft's
 > telemetry, correctly correlated to your trace id, plus whatever your own
 > services record at the tool boundary.
@@ -1283,12 +1290,12 @@ everyone. But it does mean:
   here** — they were never reached, and this document does not claim measured
   results it does not have.
 * Long-term memory should not be scheduled as "already solved" on the strength
-  of the documentation. Either validate it early in DocuSign's own tenant, or
+  of the documentation. Either validate it early in your own tenant, or
   plan the fallback.
 * The fallback is well-trodden and already proven in this POC: **conversation
   state in the customer's own Cosmos DB**, measured at 745 ms write / 938 ms
-  read over a private endpoint (§10.4). That also keeps memory inside DocuSign's
-  subscription, which suits the IP-protection requirement in §11 better than a
+  read over a private endpoint (§10.4). That also keeps memory inside the
+  customer's subscription, which suits the IP-protection requirement in §11 better than a
   managed store does.
 
 Two SDK details worth noting: the model fields are
@@ -1327,7 +1334,7 @@ added to the hosted agent and called the memory API as an ordinary client using
 the sandbox's own identity:
 
 ```text
-list_ok=true  list_ms=204..391  stores=['docusign-longterm-memory']
+list_ok=true  list_ms=204..391  stores=['poc-longterm-memory']
 ```
 
 So the hosted agent can see the project's memory stores over the private
@@ -1345,17 +1352,17 @@ for both agent types — this document does not claim them.
 One operational detail matters more than the failure itself: the agent turn took
 **163 s**, because the search **hung** rather than failing fast. A dependency
 that blocks for minutes inside a request path is worse than one that errors
-immediately. If DocuSign puts Memory on a user-facing turn, wrap the call in an
+immediately. If Memory sits on a user-facing turn, wrap the call in an
 explicit client-side timeout and a fallback — do not rely on the service to
 fail quickly. [Measured]
 
-**Practical reading for DocuSign.**
+**Practical reading.**
 
 * A prompt agent gets managed memory by adding a tool: no code, but no control
   either.
 * A hosted agent must **own the memory loop** — search at turn start, write back
   at turn end, from its own code. That is more work, and it is also the option
-  that lets DocuSign choose the store, which is what the IP requirement (§11)
+  that lets you choose the store, which is what the IP requirement (§11)
   actually wants.
 * Given the ingestion failure, the Cosmos-backed pattern already measured in
   §10.4 remains the recommendation for hosted agents until Memory leaves preview.
@@ -1381,9 +1388,9 @@ Foundry-managed BYO thread store.
 
 ---
 
-# 11. IP protection — where DocuSign data sits
+# 11. IP protection — where your data sits
 
-> *Requirement: "protecting DocuSign IP, including data, memory and session
+> *Requirement: "protecting our IP, including data, memory and session
 > state."*
 
 Mostly a consolidation of §2 plus Microsoft's published commitments.
@@ -1397,13 +1404,13 @@ Mostly a consolidation of §2 plus Microsoft's published commitments.
 | Encryption | AES-256 at rest, optional CMK — **preview features may not support CMK** | [Documented] |
 | Hosted agent **source code** | Uploaded as a ZIP; **physical store, retention and CMK support are not documented** | [Not documented] |
 
-Two items worth raising on the call rather than burying:
+Three items worth raising explicitly rather than burying:
 
 * **Abuse monitoring may retain content for human review.** Eligible customers
   can apply for **modified abuse monitoring** through the Limited Access
-  process, which removes human review and its storage. For a company handling
-  signature documents this is usually the first thing legal asks about.
-  [Documented]
+  process, which removes human review and its storage. For any organisation
+  handling confidential customer documents this is usually the first thing
+  legal asks about. [Documented]
 * **Tracing writes prompts and completions to Application Insights.** Measured
   on a prompt agent: `gen_ai.input.messages` carried the full system
   instructions and user input, `gen_ai.output.messages` the model's reply. If
@@ -1413,9 +1420,9 @@ Two items worth raising on the call rather than burying:
 * **Hosted-agent code confidentiality is not documented.** Microsoft documents
   *that* a ZIP is uploaded, but not where it is stored, how long it is kept
   after deletion, whether CMK applies, or which personnel can access it. If
-  agent code is itself DocuSign IP, the **BYO container image** path is the
-  safer answer, because the image stays in DocuSign's own registry and Foundry
-  pulls it. [Not documented / Documented]
+  agent code is itself customer IP, the **BYO container image** path is the
+  safer answer, because the image stays in the customer's own registry and
+  Foundry pulls it. [Not documented / Documented]
 
 ---
 
@@ -1534,7 +1541,7 @@ connections.get(name, include_credentials=True)
 Custom telemetry from inside the agent, DSPy and filesystem working memory are
 **hosted-agent capabilities and not prompt-agent capabilities**. The one
 qualification is correlation: prompt-agent spans do carry the caller's trace id,
-so DocuSign's telemetry joins Microsoft's even though DocuSign cannot add fields
+so your telemetry joins Microsoft's even though you cannot add fields
 to it (§7.3). Enforcing the LLM gateway as a governed control point runs the
 other way (§6) — a hosted agent can point `base_url` anywhere.
 
@@ -1653,13 +1660,13 @@ Requirement 6 — telemetry, libraries, filesystem and languages:
 ./track-d/run-in-vnet.sh deploy_agent.py TRACKD_SRC_DIR=agent-src-plat \
     TRACKD_AGENT_NAME=trackd-plat \
     AGENTENV_APPLICATIONINSIGHTS_CONNECTION_STRING='<connection-string>' \
-    AGENTENV_DOCUSIGN_TENANT=acme-corp
+    AGENTENV_CUSTOMER_TENANT=acme-corp
 
 # custom spans and metrics, then confirm they arrived
 ./track-d/run-in-vnet.sh invoke_agent.py TRACKD_AGENT_NAME=trackd-plat \
     TRACKD_PROMPT='Call probe_telemetry with marker "dsmark-alpha-01".'
 az monitor app-insights query --app <app-id> --analytics-query \
-    "union dependencies, customMetrics | where name startswith 'docusign'"
+    "union dependencies, customMetrics | where name startswith 'customer'"
 
 # prompt agents: can YOUR context become a dimension on Microsoft's spans?
 # (it cannot - this returns matches only inside message-content blobs)

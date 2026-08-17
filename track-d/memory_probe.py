@@ -30,7 +30,7 @@ import _config  # noqa: E402
 from azure.ai.projects import AIProjectClient  # noqa: E402
 from azure.identity import DefaultAzureCredential  # noqa: E402
 
-STORE = os.environ.get("TRACKD_MEMORY_STORE", "docusign-longterm-memory")
+STORE = os.environ.get("TRACKD_MEMORY_STORE", "poc-longterm-memory")
 CHAT = os.environ.get("TRACKD_MEMORY_CHAT", "gpt-4o-mini")
 EMBED = os.environ.get("TRACKD_MEMORY_EMBED", "text-embedding-3-small")
 SCOPE_A = "user-alice"
@@ -84,11 +84,11 @@ def main() -> int:
     # 2. Conversation one: state facts that a later conversation should recall.
     conversation = [
         {"type": "message", "role": "user", "content":
-            "I'm Alice from DocuSign contracts. I always want NDAs routed to "
-            "legal-review@docusign.com before sending, and I prefer envelopes "
+            "I'm Alice from the contracts team. I always want NDAs routed to "
+            "legal-review@example.internal before sending, and I prefer envelopes "
             "expire after 14 days."},
         {"type": "message", "role": "assistant", "content":
-            "Understood - NDAs go to legal-review@docusign.com first, and "
+            "Understood - NDAs go to legal-review@example.internal first, and "
             "envelopes expire after 14 days."},
     ]
     t1 = time.time()

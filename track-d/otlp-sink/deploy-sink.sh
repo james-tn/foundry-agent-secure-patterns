@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Requirement 6 - deploy a non-Azure-style OTLP receiver into the VNet.
 #
-# Stands in for DocuSign's own observability backend so the question "can the
+# Stands in for a customer's own observability backend so the question "can the
 # agent export telemetry somewhere Microsoft does not own" can be measured
 # rather than quoted from documentation.
 #

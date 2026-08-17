@@ -57,7 +57,7 @@ noted.
 
 ```mermaid
 flowchart TB
-  APP["<b>DocuSign application tier</b><br/>authenticates the user · mints traceparent + baggage<br/>writes authoritative context to a server-side store"]
+  APP["<b>Customer application tier</b><br/>authenticates the user · mints traceparent + baggage<br/>writes authoritative context to a server-side store"]
 
   subgraph FOUNDRY["Foundry account — publicNetworkAccess: Disabled, network-injected into your VNet"]
     PDEF["<b>Lane A · Prompt agent</b><br/>configuration only<br/>Foundry-managed runtime"]
@@ -67,9 +67,9 @@ flowchart TB
   end
 
   subgraph VNET["Customer VNet — delegated subnets, private endpoints, no public exposure"]
-    INTAPI["<b>Internal DocuSign APIs</b><br/>private DNS only"]
+    INTAPI["<b>Internal customer APIs</b><br/>private DNS only"]
     POOL["<b>ACA session pools</b><br/>Python · Node · Shell · C#<br/>EgressDisabled, pinned packages"]
-    GW["<b>DocuSign LLM gateway</b><br/>OpenAI-compatible · <b>must speak SSE</b>"]
+    GW["<b>Customer LLM gateway</b><br/>OpenAI-compatible · <b>must speak SSE</b>"]
     STATE[("Cosmos DB<br/>session + long-term state")]
   end
 
@@ -119,7 +119,7 @@ Three things the diagram deliberately makes visible:
 - **Context arrives, but by different channels.** `traceparent` and `baggage`
   survive into Lane A's tools; Lane B additionally receives `x-client-*` headers
   and `metadata` verbatim. Neither receives the caller's `Authorization`, so a
-  server-side context store and a token broker are DocuSign-side components in
+  server-side context store and a token broker are customer-side components in
   both cases.
 - **Untrusted code never runs in the agent process.** In-process execution in
   Lane B is ~100,000× faster but shares the agent's identity, environment and
@@ -128,14 +128,13 @@ Three things the diagram deliberately makes visible:
 
 ## Choosing a lane per scenario
 
-The two lanes are not a one-time platform decision. Different DocuSign
-scenarios have different controllability needs, and the same project can run
-both.
+The two lanes are not a one-time platform decision. Different scenarios have
+different controllability needs, and the same project can run both.
 
 ```mermaid
 flowchart TB
   START(["New agent scenario"])
-  Q1{"Does DocuSign need to own the<br/><b>agent harness</b>?<br/><i>custom orchestration · DSPy · custom OTel<br/>own memory loop · non-Python deps</i>"}
+  Q1{"Do you need to own the<br/><b>agent harness</b>?<br/><i>custom orchestration · DSPy · custom OTel<br/>own memory loop · non-Python deps</i>"}
   Q2{"Is the <b>LLM gateway</b> a mandated<br/>governance control point<br/>rather than a convenience?"}
   Q3{"Is <b>first-response latency</b><br/>user-facing and tight?"}
 
@@ -312,7 +311,7 @@ locked-down account. Summary below; full detail in
 | Code execution | Sandboxed pool, ~0.57–5.94 s | In-process, **0.15 ms**, but **no isolation** from the agent's own identity and secrets |
 | Request context (identity, tenant, correlation) | **W3C `traceparent` and `baggage` measured reaching the internal API**; `x-client-*` and `metadata` do not survive; per-user auth via Toolbox/MCP | **`x-client-*` headers, `metadata` and W3C `traceparent` measured working end to end** |
 | Existing LLM gateway (multi-provider) | Needs an admin-created **`ModelGateway`** connection; model is `<connection>/<model>` | Set `base_url` in your own client — no connection, and no governance either |
-| Custom telemetry and metrics | Microsoft's traces only — **no custom dimensions or metrics**, measured; but spans carry **your** trace id as `operation_Id` | **Custom spans and metrics measured landing in App Insights** with DocuSign dimensions |
+| Custom telemetry and metrics | Microsoft's traces only — **no custom dimensions or metrics**, measured; but spans carry **your** trace id as `operation_Id` | **Custom spans and metrics measured landing in App Insights** with customer-defined dimensions |
 | Telemetry to a non-Azure backend (Datadog, Splunk, OTLP collector) | No | **Yes — measured**: traces, metrics and logs delivered to a third-party OTLP sink |
 | Prompt-optimisation libraries (DSPy) | Not possible inside the loop | **DSPy 3.3.0 installed and ran** against the Foundry model |
 | Filesystem memory | n/a | Writable 4.1 GB disk; **persists per conversation, not across them** |
@@ -323,8 +322,8 @@ to agent code. Per-user delegated access is available through **Toolbox/MCP
 connections** (`oauth2`, `user-entra-token`); anything else needs a token-broker
 or a server-side context store.
 
-**On the LLM gateway:** the customer's driver is reaching several providers,
-naming Azure OpenAI and **Google Gemini**. Enumerating `eastus2` returns eleven
+**On the LLM gateway:** the usual driver is reaching several providers — here
+Azure OpenAI and **Google Gemini**. Enumerating `eastus2` returns eleven
 publishers — Anthropic, Meta, Mistral, DeepSeek, xAI, Cohere and others — but
 **no Google**. So every other named provider can be used natively with no
 gateway at all, while Gemini can only be reached *through* one. Both agent types
@@ -334,7 +333,7 @@ gateway that only speaks non-streaming JSON fails with an opaque `500`.
 
 **On the follow-up requirements:** custom telemetry, DSPy and filesystem memory
 were measured directly. A hosted agent emitted its own OpenTelemetry span and
-metrics with DocuSign dimensions and both were queried back out of Application
+metrics with customer-defined dimensions and both were queried back out of Application
 Insights; **DSPy 3.3.0** installed and ran a real program against the Foundry
 model; and the sandbox has a writable 4.1 GB disk that **persists across
 chained turns but not across conversations** — so the *filesystem* is
@@ -513,10 +512,14 @@ it.
 `preflight.sh` also guards against the most common failure: the Azure CLI default
 subscription silently changing, which makes every resource look deleted.
 
-> **Note on identifiers.** Documentation in this repo is written with redacted,
-> generic resource names. The scripts under `track-b/`, `track-c/` and `probes/`
-> still reference the live deployment they were built against, and would need
-> re-pointing before reuse in another environment.
+> **Note on identifiers.** This POC was run for a specific enterprise. All
+> customer-identifying names have been replaced with neutral equivalents — a
+> `customer.*` telemetry namespace, `CUSTOMER_*` environment variables and
+> generic resource names — so the repo is reusable as-is. Documentation uses
+> redacted account, project and subscription names, and business data
+> (`env-1001`, `Mutual NDA`) is synthetic. The scripts under `track-b/`,
+> `track-c/`, `track-d/` and `probes/` still reference the live deployment they
+> were built against, and need re-pointing before reuse elsewhere.
 
 ## Methodology note
 

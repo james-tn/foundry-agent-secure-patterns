@@ -16,11 +16,11 @@ with urllib.request.urlopen(f"{BASE}{PATH}", timeout=60) as resp:
 print(f"F SINK_STATUS={resp.status}")
 print(f"F COUNT={data.get('count')}")
 print(f"F SIGNALS={data.get('signals')}")
-print(f"F DOCUSIGN_NAMES={data.get('docusign_names')}")
+print(f"F CUSTOMER_NAMES={data.get('customer_names')}")
 for entry in data.get("recent", []):
     print(
         f"F RECV signal={entry['signal']} bytes={entry['bytes']} "
-        f"ctype={entry['content_type']} names={entry['docusign_names']}"
+        f"ctype={entry['content_type']} names={entry['customer_names']}"
     )
     print(f"F   SAMPLE={entry['sample']}")
 print("F RESULT=SINK_READ_OK")

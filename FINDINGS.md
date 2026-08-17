@@ -21,6 +21,13 @@ with placeholders such as `<foundry-account>` and `<subscription-id>`. Log outpu
 is otherwise verbatim. Business data (`env-1001`, `Mutual NDA`) is synthetic test
 data from a stub API.
 
+**Naming.** This POC was run for a specific enterprise; all customer-identifying
+names have been replaced with neutral equivalents — a `customer.*` telemetry
+namespace, `CUSTOMER_*` environment variables and generic resource names. The
+probe code in this repo emits exactly the names shown here, so re-running
+reproduces the documented output. The namespace itself is arbitrary: the
+finding is that a **caller-chosen** namespace survives end to end.
+
 **Measurement caveat.** Figures come from one environment, region and model. They
 show **relative** cost and **where time is spent**. Re-measure before using any of
 them as an SLA.
@@ -438,7 +445,7 @@ headers, `metadata`, a `traceparent` and a `baggage` header on the request.
 
 ```text
 traceparent: 00-11112222333344445555666677778888-909d89b9288336d0-01
-baggage:     docusign_tenant = contoso-eu, docusign_corr = corr-prompt-77,
+baggage:     customer_tenant = contoso-eu, customer_corr = corr-prompt-77,
              leaf_customer_span_id = 8e6fbb6cd61dad1f
 ```
 

@@ -51,9 +51,9 @@ CORRELATION = "corr-prompt-77"
 # CTX_BAGGAGE_PAD sizes a filler entry so the practical ceiling can be found;
 # the W3C spec allows 8192 bytes but says nothing about what a proxy enforces.
 _PAD = int(os.environ.get("CTX_BAGGAGE_PAD", "0"))
-BAGGAGE = f"docusign_tenant=contoso-eu,docusign_corr={CORRELATION}"
+BAGGAGE = f"customer_tenant=contoso-eu,customer_corr={CORRELATION}"
 if _PAD:
-    BAGGAGE += ",docusign_pad=" + ("x" * _PAD)
+    BAGGAGE += ",customer_pad=" + ("x" * _PAD)
 
 
 def get_json(path: str) -> dict:

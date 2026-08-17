@@ -61,7 +61,7 @@ def main():
     envelope_tool = {
         "type": "function",
         "name": "get_envelope_status",
-        "description": "Look up a DocuSign envelope status by id.",
+        "description": "Look up an envelope status by id.",
         "parameters": {
             "type": "object",
             "properties": {"envelope_id": {"type": "string"}},

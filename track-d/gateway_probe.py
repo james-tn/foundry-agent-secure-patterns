@@ -69,7 +69,7 @@ WEATHER_TOOL = {
     "type": "function",
     "function": {
         "name": "get_envelope_status",
-        "description": "Look up the status of a DocuSign envelope by id.",
+        "description": "Look up the status of an envelope by id.",
         "parameters": {
             "type": "object",
             "properties": {"envelope_id": {"type": "string"}},
@@ -84,7 +84,7 @@ def run_prompt_agent(model, label):
     status, agent = call("POST", "/assistants", {
         "name": f"gw-probe-{label}",
         "model": model,
-        "instructions": "You look up DocuSign envelope status. Always use the tool.",
+        "instructions": "You look up envelope status. Always use the tool.",
         "tools": [WEATHER_TOOL],
     })
     emit(f"{label}.create_status", status)

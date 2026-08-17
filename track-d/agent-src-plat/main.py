@@ -68,9 +68,9 @@ def _configure_otlp(endpoint: str) -> None:
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
     resource = Resource.create({
-        "service.name": os.environ.get("OTEL_SERVICE_NAME", "docusign-hosted-agent"),
-        "docusign.tenant": os.environ.get("DOCUSIGN_TENANT", "acme-corp"),
-        "docusign.component": "envelope-agent",
+        "service.name": os.environ.get("OTEL_SERVICE_NAME", "customer-hosted-agent"),
+        "customer.tenant": os.environ.get("CUSTOMER_TENANT", "acme-corp"),
+        "customer.component": "envelope-agent",
     })
     base = endpoint.rstrip("/")
 
@@ -115,9 +115,9 @@ def _configure_telemetry() -> None:
             connection_string=conn,
             # A customer dimension applied to every signal this agent emits.
             resource_attributes={
-                "service.name": os.environ.get("OTEL_SERVICE_NAME", "docusign-hosted-agent"),
-                "docusign.tenant": os.environ.get("DOCUSIGN_TENANT", "acme-corp"),
-                "docusign.component": "envelope-agent",
+                "service.name": os.environ.get("OTEL_SERVICE_NAME", "customer-hosted-agent"),
+                "customer.tenant": os.environ.get("CUSTOMER_TENANT", "acme-corp"),
+                "customer.component": "envelope-agent",
             },
         )
         _TELEMETRY["configured"] = True
@@ -140,29 +140,29 @@ def probe_telemetry(
     try:
         from opentelemetry import metrics, trace
 
-        tracer = trace.get_tracer("docusign.agent.custom")
-        with tracer.start_as_current_span("docusign.envelope.validate") as span:
+        tracer = trace.get_tracer("customer.agent.custom")
+        with tracer.start_as_current_span("customer.envelope.validate") as span:
             # Customer-defined dimensions on a customer-defined span.
-            span.set_attribute("docusign.marker", marker)
-            span.set_attribute("docusign.envelope_id", "env-1001")
-            span.set_attribute("docusign.tenant", os.environ.get("DOCUSIGN_TENANT", "acme-corp"))
-            span.set_attribute("docusign.correlation_id", str(uuid.uuid4()))
+            span.set_attribute("customer.marker", marker)
+            span.set_attribute("customer.envelope_id", "env-1001")
+            span.set_attribute("customer.tenant", os.environ.get("CUSTOMER_TENANT", "acme-corp"))
+            span.set_attribute("customer.correlation_id", str(uuid.uuid4()))
             ctx = span.get_span_context()
             out["trace_id"] = format(ctx.trace_id, "032x")
             out["span_id"] = format(ctx.span_id, "016x")
             out["span_recording"] = span.is_recording()
             time.sleep(0.05)
 
-        meter = metrics.get_meter("docusign.agent.custom")
+        meter = metrics.get_meter("customer.agent.custom")
         counter = meter.create_counter(
-            "docusign.envelopes.processed", unit="1", description="Envelopes processed"
+            "customer.envelopes.processed", unit="1", description="Envelopes processed"
         )
-        counter.add(3, {"docusign.marker": marker, "docusign.result": "ok"})
+        counter.add(3, {"customer.marker": marker, "customer.result": "ok"})
         hist = meter.create_histogram(
-            "docusign.envelope.latency", unit="ms", description="Envelope latency"
+            "customer.envelope.latency", unit="ms", description="Envelope latency"
         )
-        hist.record(42.5, {"docusign.marker": marker})
-        out["metrics_emitted"] = ["docusign.envelopes.processed", "docusign.envelope.latency"]
+        hist.record(42.5, {"customer.marker": marker})
+        out["metrics_emitted"] = ["customer.envelopes.processed", "customer.envelope.latency"]
 
         # Force export so the signal is queryable without waiting on shutdown.
         try:
@@ -226,7 +226,7 @@ def probe_dspy(
 def _probe_path(path: str) -> dict:
     """Can we write here, and is anything from a previous invocation still here?"""
     entry: dict = {"path": path}
-    marker_file = os.path.join(path, "docusign_memory_probe.jsonl")
+    marker_file = os.path.join(path, "memory_probe.jsonl")
     try:
         os.makedirs(path, exist_ok=True)
         prior = []
@@ -297,7 +297,7 @@ def probe_runtimes() -> str:
             runtimes[name] = f"error: {type(exc).__name__}"
 
     interesting = ("FOUNDRY", "AZURE", "APPLICATIONINSIGHTS", "OTEL", "IDENTITY",
-                   "MSI", "PORT", "AGENT", "DOCUSIGN")
+                   "MSI", "PORT", "AGENT", "CUSTOMER")
     return json.dumps({
         "instance_id": INSTANCE_ID,
         "python": sys.version.split()[0],
@@ -323,7 +323,7 @@ def probe_memory(
     have. So the only route is to be an ordinary client of the memory API using
     the sandbox's own identity. This measures whether that route works.
     """
-    out = {"scope": scope, "store": os.environ.get("MEMORY_STORE", "docusign-longterm-memory")}
+    out = {"scope": scope, "store": os.environ.get("MEMORY_STORE", "poc-longterm-memory")}
     try:
         from azure.ai.projects import AIProjectClient
 

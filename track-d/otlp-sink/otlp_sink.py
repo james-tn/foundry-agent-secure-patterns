@@ -1,6 +1,6 @@
 """A stand-in for a non-Azure observability backend (Datadog, Honeycomb, ...).
 
-DocuSign's telemetry does not go to Azure Monitor, so the question is not
+Many customers do not send telemetry to Azure Monitor, so the question is not
 "does Foundry emit telemetry" but "can the agent ship it somewhere Microsoft
 does not own". This receiver is the smallest thing that can answer it: it
 speaks the OTLP/HTTP surface, accepts `/v1/traces`, `/v1/metrics` and
@@ -51,12 +51,12 @@ class Handler(BaseHTTPRequestHandler):
             limit = int(query.get("n", ["8"])[0])
             with _LOCK:
                 data = list(_RECEIVED)
-            names = sorted({n for entry in data for n in entry["docusign_names"]})
+            names = sorted({n for entry in data for n in entry["customer_names"]})
             shown = [e for e in data if want is None or e["signal"] == want]
             self._send(200, {
                 "count": len(data),
                 "signals": sorted({entry["signal"] for entry in data}),
-                "docusign_names": names,
+                "customer_names": names,
                 "recent": shown[-limit:],
             })
         elif self.path.startswith("/_reset"):
@@ -77,7 +77,7 @@ class Handler(BaseHTTPRequestHandler):
             "bytes": len(body),
             "content_type": self.headers.get("Content-Type", ""),
             # Proof it is *our* telemetry rather than the platform's.
-            "docusign_names": sorted({s for s in found if "docusign" in s.lower()}),
+            "customer_names": sorted({s for s in found if "customer" in s.lower()}),
             "sample": found[:12],
         }
         with _LOCK:
